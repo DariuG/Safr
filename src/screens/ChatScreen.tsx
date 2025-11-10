@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   View, 
   Text, 
@@ -209,7 +209,36 @@ const ChatScreen = () => {
     }
   };
 
-  	// handleDownloadModel("Llama-3.2-1B-Instruct-Q2_K.gguf");
+  // On mount, check whether the model file already exists on device.
+  // If it does, switch to the conversation view and attempt to load it.
+  useEffect(() => {
+    let mounted = true;
+
+    const checkAndLoadModel = async () => {
+      try {
+        const modelDir = `${RNFS.DocumentDirectoryPath}/models`;
+        const destPath = `${modelDir}/${MODEL_FORMAT}`;
+        const exists = await RNFS.exists(destPath);
+        if (exists && mounted) {
+          // Show conversation screen and try to initialize the model in background
+          setCurrentPage('conversation');
+          const ok = await loadModel(MODEL_FORMAT);
+          if (!ok && mounted) {
+            // If initialization failed, go back to selection so user can retry
+            setCurrentPage('modelSelection');
+          }
+        }
+      } catch (err) {
+        console.log('Error checking/loading model on mount', err);
+      }
+    };
+
+    checkAndLoadModel();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   	return (
     <SafeAreaView style={styles.container}>
@@ -217,15 +246,15 @@ const ChatScreen = () => {
         ref={scrollViewRef}
         contentContainerStyle={styles.scrollView}
         onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}>
-        <Text style={styles.title}>Llama Chat</Text>
+        <Text style={styles.title}>Safr assistant</Text>
         {/* Model Selection Section */}
         {currentPage === 'modelSelection' && !isDownloading && (
           <View style={styles.card}>
-            <Text style={styles.subtitle}>Download the model!</Text>
+            <Text style={styles.subtitle}>First download the model file</Text>
             <TouchableOpacity
               style={styles.button}		
               onPress={() => handleDownloadAndNavigate(MODEL_FORMAT)}>
-              <Text style={styles.buttonText}>Download!</Text>
+              <Text style={styles.buttonText}>Download</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -240,7 +269,7 @@ const ChatScreen = () => {
             ) : (
               <>
                 <Text style={styles.greetingText}>
-                  🦙 Welcome! The Llama is ready to chat. Ask away! 🎉
+                  Your personal emergency assistant is ready to chat. How can I help you today?
                 </Text>
                 {conversation.slice(1).map((msg, index) => (
                   <View key={index} style={styles.messageWrapper}>

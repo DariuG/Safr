@@ -15,6 +15,12 @@ import { downloadModel } from '../api/model';
 import RNFS from "react-native-fs";
 import { initLlama, releaseAllLlama } from 'llama.rn';
 import ProgressBar from '../components/ProgressBar';
+import { 
+  loadKnowledgeBase, 
+  retrieveRelevantContext, 
+  formatContextForPrompt,
+  type KnowledgeEntry 
+} from '../utils/rag';
 
 
 type Message = {
@@ -30,7 +36,7 @@ const ChatScreen = () => {
 		{
 			role: 'system',
 			content:
-			'This is a conversation between user and assistant, a friendly chatbot.',
+			'You are a helpful emergency first-aid assistant. Answer the user\'s question using the information provided in the CONTEXT section below. Be direct and clear. Only use information from the CONTEXT.',
 		},
 	];
 
@@ -41,71 +47,108 @@ const ChatScreen = () => {
 	const [userInput, setUserInput] = useState<string>('');
 	const [progress, setProgress] = useState<number>(0);
 	const [context, setContext] = useState<any>(null);
+	const [embeddingContext, setEmbeddingContext] = useState<any>(null);
+	const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeEntry[]>([]);
 	const [isDownloading, setIsDownloading] = useState<boolean>(false);
+	const [downloadingModel, setDownloadingModel] = useState<string>('');
 	const [isGenerating, setIsGenerating] = useState<boolean>(false);
 	const [isInitializing, setIsInitializing] = useState<boolean>(false);
 	const [currentPage, setCurrentPage] = useState<Page>("modelSelection");
+	const [embeddingModelExists, setEmbeddingModelExists] = useState<boolean>(false);
 	const scrollViewRef = React.useRef<ScrollView>(null);
 
 	const GGUF_MODEL = "medmekk/Llama-3.2-1B-Instruct.GGUF";
-	const MODEL_FORMAT = "Llama-3.2-1B-Instruct-Q2_K.gguf"
-	//   "medmekk/Qwen2.5-0.5B-Instruct.GGUF";
+	// const MODEL_FORMAT = "Llama-3.2-1B-Instruct-Q2_K.gguf"
+	const MODEL_FORMAT = "Llama-3.2-1B-Instruct-Q5_K_S.gguf"
+	
+	// Embedding model - use nomic-embed which is proven to work with llama.rn
+	// Note: This produces 768-dim embeddings, you'll need to regenerate your knowledge base
+	const EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5-GGUF";
+	const EMBEDDING_MODEL_FORMAT = "nomic-embed-text-v1.5.Q4_K_M.gguf";
 
 
-	const handleDownloadAndNavigate = async (file: string) => {
-		Alert.alert(
-		"Confirm Download",
-		`Do you want to download ${file}?`,
-		[
-			{
-			text: "No",
-			style: "cancel",
-			},
-			{
-			text: "Yes",
-			onPress: async () => {
-				try {
-					await handleDownloadModel(file);
-					setCurrentPage("conversation"); // Only navigate after successful download
-				} catch (error) {
-					Alert.alert('Error', 'Failed to download and initialize the model');
-				}
-			}},
-		],
-		{ cancelable: false }
-		);
+	const handleDownloadAllModels = async () => {
+		try {
+			// Download LLM first
+			setIsDownloading(true);
+			setDownloadingModel(MODEL_FORMAT);
+			setProgress(0);
+
+			const llmUrl = `https://huggingface.co/${GGUF_MODEL}/resolve/main/${MODEL_FORMAT}`;
+			await downloadModel(MODEL_FORMAT, llmUrl, progress => setProgress(progress));
+			console.log('✅ Chat model downloaded');
+
+			// Download embedding model
+			setDownloadingModel(EMBEDDING_MODEL_FORMAT);
+			setProgress(0);
+
+			const embeddingUrl = `https://huggingface.co/${EMBEDDING_MODEL}/resolve/main/${EMBEDDING_MODEL_FORMAT}`;
+			await downloadModel(EMBEDDING_MODEL_FORMAT, embeddingUrl, progress => setProgress(progress));
+			console.log('✅ Embedding model downloaded');
+
+			setIsDownloading(false);
+			setDownloadingModel('');
+
+			Alert.alert('Success', 'Both models downloaded successfully!');
+			
+			// Load both models
+			await loadModel(MODEL_FORMAT);
+			setCurrentPage('conversation');
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : 'Download failed';
+			Alert.alert('Error', errorMessage);
+			setIsDownloading(false);
+			setDownloadingModel('');
+		}
 	};
 
- 	const handleDownloadModel = async (file: string) => {
-		const downloadUrl = `https://huggingface.co/${
-		GGUF_MODEL
-		}/resolve/main/${file}`;
-		// we set the isDownloading state to true to show the progress bar and set the progress to 0
+	const handleDownloadLLM = async () => {
 		setIsDownloading(true);
+		setDownloadingModel(MODEL_FORMAT);
 		setProgress(0);
 
 		try {
-		// we download the model using the downloadModel function, it takes the selected GGUF file, the download URL, and a progress callback function to update the progress bar
-		const destPath = await downloadModel(file, downloadUrl, progress =>
-			setProgress(progress),
-		);
+			const downloadUrl = `https://huggingface.co/${GGUF_MODEL}/resolve/main/${MODEL_FORMAT}`;
+			const destPath = await downloadModel(MODEL_FORMAT, downloadUrl, progress =>
+				setProgress(progress),
+			);
 
-		// Success
-		Alert.alert('Success', `Model downloaded to: ${destPath}`);
-		if (destPath) {
-			await loadModel(file);
-		} else {
-			throw new Error('Model download path is invalid.');
-		}
-
+			Alert.alert('Success', 'Chat model downloaded successfully!');
+			
+			// Load the LLM after download
+			await loadModel(MODEL_FORMAT);
+			setCurrentPage('conversation');
 		} catch (error) {
-		const errorMessage =
-			error instanceof Error
-			? error.message
-			: 'Download failed due to an unknown error.';
-		Alert.alert('Error', errorMessage);
+			const errorMessage = error instanceof Error ? error.message : 'Download failed';
+			Alert.alert('Error', errorMessage);
 		} finally {
-		setIsDownloading(false);
+			setIsDownloading(false);
+			setDownloadingModel('');
+		}
+	};
+
+	const handleDownloadEmbedding = async () => {
+		setIsDownloading(true);
+		setDownloadingModel(EMBEDDING_MODEL_FORMAT);
+		setProgress(0);
+
+		try {
+			const downloadUrl = `https://huggingface.co/${EMBEDDING_MODEL}/resolve/main/${EMBEDDING_MODEL_FORMAT}`;
+			const destPath = await downloadModel(EMBEDDING_MODEL_FORMAT, downloadUrl, progress =>
+				setProgress(progress),
+			);
+
+			Alert.alert('Success', 'Embedding model downloaded successfully!');
+			
+			// Load the embedding model after download
+			await loadEmbeddingModel();
+			setEmbeddingModelExists(true);
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : 'Download failed';
+			Alert.alert('Error', errorMessage);
+		} finally {
+			setIsDownloading(false);
+			setDownloadingModel('');
 		}
 	};
 
@@ -121,18 +164,128 @@ const ChatScreen = () => {
       return;
     }
 
-    const newConversation: Message[] = [
-      // ... is a spread operator that spreads the previous conversation array to which we add the new user message
-      ...conversation,
-      {role: 'user', content: userInput},
-    ];
+    const userMessage = userInput.trim();
     setIsGenerating(true);
-    // Update conversation state and clear user input
-    setConversation(newConversation);
     setUserInput('');
 
     try {
-      // we define list the stop words for all the model formats
+      // Generate embedding for the user query
+      let retrievedContext = '';
+      
+      if (knowledgeBase.length > 0 && embeddingContext) {
+        try {
+          // Generate embedding for user query (now matches pattern-only KB embeddings)
+          const { embedding: queryEmbedding } = await embeddingContext.embedding(userMessage);
+          
+          console.log(`📊 Query embedding dimensions: ${queryEmbedding.length}`);
+          console.log(`📊 First 10 values of query embedding:`, queryEmbedding.slice(0, 10));
+          console.log(`📊 Sum of query embedding:`, queryEmbedding.reduce((a: number, b: number) => a + b, 0));
+          console.log(`📊 Knowledge base embedding dimensions: ${knowledgeBase[0].embedding.length}`);
+          console.log(`📊 First 10 values of KB embedding:`, knowledgeBase[0].embedding.slice(0, 10));
+          
+          // Check if embeddings are all zeros or constant
+          const querySum = queryEmbedding.reduce((a: number, b: number) => a + b, 0);
+          const queryVariance = queryEmbedding.reduce((sum: number, val: number) => sum + val * val, 0);
+          
+          if (Math.abs(querySum) < 0.001 || Math.abs(queryVariance) < 0.001) {
+            console.error('❌ Query embedding appears to be all zeros or constant!');
+            console.error('The embedding model may not be working correctly.');
+            throw new Error('Invalid embedding generated');
+          }
+          
+          // Check if dimensions match
+          if (queryEmbedding.length !== knowledgeBase[0].embedding.length) {
+            console.warn(`⚠️ Embedding dimension mismatch! Query: ${queryEmbedding.length}, KB: ${knowledgeBase[0].embedding.length}`);
+            console.warn('⚠️ Skipping RAG - model does not support same embedding dimension as knowledge base');
+          } else {
+            // Retrieve relevant context from knowledge base with lower threshold
+            const relevantEntries = retrieveRelevantContext(
+              queryEmbedding,
+              knowledgeBase,
+              5,    // Top 5 results to capture multi-part answers
+              0.15  // 15% threshold to include related chunks
+            );
+            
+            // Log all similarity scores for debugging
+            console.log('🔍 Top 10 similarity scores:');
+            const allScores = knowledgeBase.map(entry => ({
+              tag: entry.tag,
+              id: entry.id,
+              score: retrieveRelevantContext(queryEmbedding, [entry], 1, 0)[0]?.score || 0
+            })).sort((a, b) => b.score - a.score).slice(0, 10);
+            
+            allScores.forEach((item, idx) => {
+              console.log(`  ${idx + 1}. ${item.id} [${item.tag}]: ${(item.score * 100).toFixed(2)}%`);
+            });
+            
+            // Check if best match is below 60% - reject immediately
+            const bestScore = allScores[0]?.score || 0;
+            if (bestScore < 0.6) {
+              console.log(`⚠️ Best similarity score ${(bestScore * 100).toFixed(2)}% is below 75% threshold`);
+              console.log('🚫 Query appears unrelated to medical emergencies - returning standard rejection');
+              
+              // Set conversation with rejection message and skip LLM call
+              setConversation(prev => [
+                ...prev,
+                {role: 'assistant', content: 'In case of any emergency, call 112!\n\nAccording to my knowledge base: I don\'t have information about this topic. Please call 112 (emergency services) immediately for professional help.'}
+              ]);
+              setIsGenerating(false);
+              return; // Exit early without calling LLM
+            }
+            
+            if (relevantEntries.length > 0) {
+              retrievedContext = formatContextForPrompt(relevantEntries);
+              console.log(`✅ Retrieved ${relevantEntries.length} relevant contexts`);
+              relevantEntries.forEach((item, idx) => {
+                console.log(`  ${idx + 1}. ${item.entry.id}: ${(item.score * 100).toFixed(1)}% similarity`);
+                console.log(`     Pattern: ${item.entry.pattern}`);
+                console.log(`     Response length: ${item.entry.response.length} chars`);
+                console.log(`     Response preview: ${item.entry.response.substring(0, 80)}...`);
+              });
+              console.log(`📝 Total context size: ${retrievedContext.length} characters`);
+              console.log('📝 Full context sent to model:');
+              console.log(retrievedContext.substring(0, 600) + '...');
+            } else {
+              console.log('⚠️ No relevant context found above threshold');
+              console.log('💡 Best match was:', allScores[0]);
+            }
+          }
+        } catch (embeddingError) {
+          console.warn('⚠️ Failed to generate embedding, continuing without RAG:', embeddingError);
+        }
+      } else if (!embeddingContext) {
+        console.log('⚠️ Embedding model not loaded, skipping RAG');
+      }
+
+      // Build conversation with retrieved context injected into system message
+      let systemMessage = INITIAL_CONVERSATION[0].content;
+      
+      if (retrievedContext) {
+        // Medical query with relevant context found
+        systemMessage += "\n\nCONTEXT:\n" + retrievedContext + "\n\nUse the above context to answer the question.";
+      } else {
+        // No relevant context found - refuse to answer
+        systemMessage += "\n\nCONTEXT:\nNo relevant information available.\n\nTell the user you don't have information about this topic.";
+      }
+
+      // Keep only the last 4 message pairs (8 messages) to avoid context overflow
+      // Skip the original system message (index 0) when slicing
+      const recentMessages = conversation.slice(1).slice(-8);
+
+      const newConversation: Message[] = [
+        { role: 'system', content: systemMessage },
+        // Add only recent user/assistant messages
+        ...recentMessages,
+        { role: 'user', content: userMessage },
+      ];
+
+      // Update conversation state with user message
+      setConversation(prev => [
+        ...prev,
+        {role: 'user', content: userMessage},
+      ]);
+
+      // Define stop words for all model formats
       const stopWords = [
         '</s>',
         '<|end|>',
@@ -143,7 +296,8 @@ const ChatScreen = () => {
         '<|end▁of▁sentence|>',
         '<｜end▁of▁sentence｜>',
       ];
-      // now that we have the new conversation with the user message, we can send it to the model
+      
+      // Send to model with retrieved context
       const result = await context.completion({
         messages: newConversation,
         n_predict: 10000,
@@ -174,7 +328,8 @@ const ChatScreen = () => {
   const loadModel = async (modelName: string) => {
     setIsInitializing(true);
     try {
-      const destPath = `${RNFS.DocumentDirectoryPath}/${modelName}`;
+      const modelDir = `${RNFS.DocumentDirectoryPath}/models`;
+      const destPath = `${modelDir}/${modelName}`;
 
       // Ensure the model file exists before attempting to load it
       const fileExists = await RNFS.exists(destPath);
@@ -185,14 +340,16 @@ const ChatScreen = () => {
       if (context) {
         await releaseAllLlama();
         setContext(null);
+        setEmbeddingContext(null);
         setConversation(INITIAL_CONVERSATION);
       }
 
+      // Load main LLM for chat
       const llamaContext = await initLlama({
         model: destPath,
         use_mlock: true,
-        n_ctx: 2048,
-        n_gpu_layers: 1
+        n_ctx: 4096,
+        n_gpu_layers: 1,
       });
       
       if (!llamaContext) {
@@ -200,6 +357,10 @@ const ChatScreen = () => {
       }
 
       setContext(llamaContext);
+      
+      // Load embedding model for RAG (in background)
+      loadEmbeddingModel();
+      
       return true;
     } catch (error) {
       Alert.alert('Error Loading Model', error instanceof Error ? error.message : 'An unknown error occurred.');
@@ -208,6 +369,67 @@ const ChatScreen = () => {
       setIsInitializing(false);
     }
   };
+
+  const loadEmbeddingModel = async () => {
+    try {
+      const modelDir = `${RNFS.DocumentDirectoryPath}/models`;
+      const embeddingPath = `${modelDir}/${EMBEDDING_MODEL_FORMAT}`;
+
+      // Check if embedding model exists
+      const exists = await RNFS.exists(embeddingPath);
+      setEmbeddingModelExists(exists);
+      
+      if (!exists) {
+        console.log('⚠️ Embedding model not found. RAG will be disabled.');
+        console.log(`💡 To enable RAG, download: ${EMBEDDING_MODEL}`);
+        return;
+      }
+
+      console.log('📦 Loading embedding model for RAG...');
+      
+      const embContext = await initLlama({
+        model: embeddingPath,
+        use_mlock: true,
+        n_ctx: 512,
+        embedding: true,
+        n_gpu_layers: 1,
+      });
+
+      if (embContext) {
+        setEmbeddingContext(embContext);
+        console.log('✅ Embedding model loaded successfully');
+      }
+    } catch (error) {
+      console.warn('⚠️ Failed to load embedding model:', error);
+      console.log('RAG will be disabled');
+    }
+  };
+
+  // Load knowledge base on mount
+  useEffect(() => {
+    let mounted = true;
+
+    const loadKB = async () => {
+      try {
+        const kb = await loadKnowledgeBase();
+        if (mounted) {
+          setKnowledgeBase(kb);
+        }
+      } catch (error) {
+        console.error('Failed to load knowledge base:', error);
+        Alert.alert(
+          'Knowledge Base Error',
+          'Failed to load emergency knowledge base. RAG features will be disabled.',
+        );
+      }
+    };
+
+    loadKB();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // On mount, check whether the model file already exists on device.
   // If it does, switch to the conversation view and attempt to load it.
@@ -218,7 +440,10 @@ const ChatScreen = () => {
       try {
         const modelDir = `${RNFS.DocumentDirectoryPath}/models`;
         const destPath = `${modelDir}/${MODEL_FORMAT}`;
+        const embeddingPath = `${modelDir}/${EMBEDDING_MODEL_FORMAT}`;
         const exists = await RNFS.exists(destPath);
+        const embExists = await RNFS.exists(embeddingPath);
+        setEmbeddingModelExists(embExists);
         if (exists && mounted) {
           // Show conversation screen and try to initialize the model in background
           setCurrentPage('conversation');
@@ -250,11 +475,20 @@ const ChatScreen = () => {
         {/* Model Selection Section */}
         {currentPage === 'modelSelection' && !isDownloading && (
           <View style={styles.card}>
-            <Text style={styles.subtitle}>First download the model file</Text>
+            <Text style={styles.subtitle}>Download Models</Text>
+            <Text style={styles.cardText}>
+              This will download both the chat model and embedding model for RAG functionality.
+            </Text>
+            <Text style={[styles.cardText, { marginTop: 8, fontSize: 12, fontStyle: 'italic' }]}>
+              • Chat Model: {MODEL_FORMAT}
+            </Text>
+            <Text style={[styles.cardText, { fontSize: 12, fontStyle: 'italic' }]}>
+              • Embedding Model: {EMBEDDING_MODEL_FORMAT}
+            </Text>
             <TouchableOpacity
-              style={styles.button}		
-              onPress={() => handleDownloadAndNavigate(MODEL_FORMAT)}>
-              <Text style={styles.buttonText}>Download</Text>
+              style={styles.button}
+              onPress={handleDownloadAllModels}>
+              <Text style={styles.buttonText}>Download Both Models</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -301,8 +535,8 @@ const ChatScreen = () => {
         )}
         {isDownloading && (
           <View style={styles.card}>
-            <Text style={styles.subtitle}>Downloading : </Text>
-            <Text style={styles.subtitle2}>{GGUF_MODEL}</Text>
+            <Text style={styles.subtitle}>Downloading</Text>
+            <Text style={styles.subtitle2}>{downloadingModel}</Text>
             <ProgressBar progress={progress} />
           </View>
         )}
@@ -391,6 +625,11 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginBottom: 16,
     color: '#93C5FD',
+  },
+  cardText: {
+    fontSize: 14,
+    color: '#64748B',
+    marginBottom: 8,
   },
   button: {
     backgroundColor: '#93C5FD', // Lighter blue

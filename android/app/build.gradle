@@ -105,6 +105,10 @@ android {
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
     }
+    // ADAUGĂ ACEASTĂ SECȚIUNE: Pentru a nu comprima harta
+    aaptOptions {
+        noCompress "mbtiles"
+    }
 }
 
 dependencies {

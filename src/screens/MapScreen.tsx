@@ -38,15 +38,30 @@ const MapScreen = () => {
         if (!exists) {
             console.log("Copiere harta din assets...");
             if (Platform.OS === 'android') {
+              // Android: Copy from bundled assets folder
               await RNFS.copyFileAssets(fileName, destPath);
+              console.log("✅ Harta copiată cu succes pe Android");
             } else {
-              await RNFS.copyFile(`${RNFS.MainBundlePath}/${fileName}`, destPath);
+              // iOS: Copy from app bundle (requires file to be added in Xcode)
+              const bundlePath = `${RNFS.MainBundlePath}/${fileName}`;
+              console.log(`Attempting to copy from: ${bundlePath}`);
+              const bundleExists = await RNFS.exists(bundlePath);
+              
+              if (bundleExists) {
+                await RNFS.copyFile(bundlePath, destPath);
+                console.log("✅ Harta copiată cu succes pe iOS");
+              } else {
+                throw new Error(`Bundle file not found at: ${bundlePath}`);
+              }
             }
+        } else {
+          console.log("✅ Harta există deja în DocumentDirectory");
         }
         setMapPath(destPath);
         setIsMapReady(true);
       } catch (error) {
-        console.error("Eroare harta:", error);
+        console.error("❌ Eroare la copierea hărții:", error);
+        console.log("⚠️ Aplicația va continua fără hartă offline");
         setMapPath(null); 
         setIsMapReady(true);
       }

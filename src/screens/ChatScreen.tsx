@@ -739,7 +739,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     borderTopWidth: 1,
     borderTopColor: '#E2E8F0',
-    marginBottom: Platform.OS === 'android' ? 90 : 0, // Add bottom margin to avoid overlap with navigation
+    paddingBottom: Platform.OS === 'ios' ? 110 : 100, // Space for tab bar (90px) + extra padding
   },
 });
 

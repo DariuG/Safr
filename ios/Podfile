@@ -30,5 +30,8 @@ target 'Safr' do
       :mac_catalyst_enabled => false,
       # :ccache_enabled => true
     )
+
+    # Required for MapLibre
+    $MLRN.post_install(installer)
   end
 end

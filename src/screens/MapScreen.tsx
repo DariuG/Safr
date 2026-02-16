@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ActivityIndicator, PermissionsAndroid, Linking } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ActivityIndicator, PermissionsAndroid, Linking, TextInput, ScrollView } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import RNFS from 'react-native-fs';
 import Geolocation from 'react-native-geolocation-service';
@@ -11,17 +11,74 @@ import {
   estimateTravelTime,
   formatTravelTime,
 } from '../utils/navigation';
+import { useAuth } from '../context/AuthContext';
+import {
+  DisasterAlert,
+  AlertType,
+  AlertSeverity,
+  ALERT_TYPE_LABELS,
+  ALERT_SEVERITY_LABELS,
+  createAlert,
+  subscribeToAlerts,
+  deleteAlert,
+} from '../services/alertService';
 
-// --- DISASTER ZONES (mock for now) ---
-const DISASTER_ZONES = [
-  { id: 'd1', type: 'fire', lat: 45.751, lng: 21.222, radius: 300 },
-];
+// Helper function to create a circle polygon from center point and radius in km
+const createCirclePolygon = (centerLng: number, centerLat: number, radiusKm: number, points: number = 64): number[][] => {
+  const coords: number[][] = [];
+  const earthRadius = 6371; // km
+
+  for (let i = 0; i <= points; i++) {
+    const angle = (i * 360) / points;
+    const angleRad = (angle * Math.PI) / 180;
+
+    // Calculate point on circle using haversine formula inverse
+    const latRad = (centerLat * Math.PI) / 180;
+    const lngRad = (centerLng * Math.PI) / 180;
+
+    const newLatRad = Math.asin(
+      Math.sin(latRad) * Math.cos(radiusKm / earthRadius) +
+      Math.cos(latRad) * Math.sin(radiusKm / earthRadius) * Math.cos(angleRad)
+    );
+
+    const newLngRad = lngRad + Math.atan2(
+      Math.sin(angleRad) * Math.sin(radiusKm / earthRadius) * Math.cos(latRad),
+      Math.cos(radiusKm / earthRadius) - Math.sin(latRad) * Math.sin(newLatRad)
+    );
+
+    const newLat = (newLatRad * 180) / Math.PI;
+    const newLng = (newLngRad * 180) / Math.PI;
+
+    coords.push([newLng, newLat]);
+  }
+
+  return coords;
+};
 
 // Location permission status type
 type LocationPermissionStatus = 'granted' | 'denied' | 'disabled' | 'restricted' | 'unavailable';
 
 const MapScreen = () => {
+  // Auth state
+  const { isAdmin } = useAuth();
+
   const [selectedLocation, setSelectedLocation] = useState<Shelter | null>(null);
+
+  // Alert state (pentru admin)
+  const [alerts, setAlerts] = useState<DisasterAlert[]>([]);
+  const [showAlertForm, setShowAlertForm] = useState(false);
+  const [alertTapLocation, setAlertTapLocation] = useState<{lat: number, lng: number} | null>(null);
+  const [isCreatingAlert, setIsCreatingAlert] = useState(false);
+  const [selectedAlert, setSelectedAlert] = useState<DisasterAlert | null>(null);
+  const [showAlertsModal, setShowAlertsModal] = useState(false);
+  const [deletingAlertId, setDeletingAlertId] = useState<string | null>(null);
+
+  // Alert form fields
+  const [alertType, setAlertType] = useState<AlertType>('fire');
+  const [alertSeverity, setAlertSeverity] = useState<AlertSeverity>('medium');
+  const [alertMessage, setAlertMessage] = useState('');
+  const [alertRadius, setAlertRadius] = useState('1'); // km
+  const [alertDuration, setAlertDuration] = useState('24'); // ore
 
   // Stare pentru Harta Offline
   const [mapPath, setMapPath] = useState<string | null>(null);
@@ -234,7 +291,28 @@ const MapScreen = () => {
     };
   }, [requestLocationPermission, getLocationErrorMessage]);
 
-  // --- 2.5. LOAD SHELTERS FROM OVERPASS API ---
+  // --- 2.5. SUBSCRIBE TO ALERTS (FIREBASE REALTIME) ---
+  useEffect(() => {
+    console.log('[MapScreen] Subscribing to alerts...');
+
+    const unsubscribe = subscribeToAlerts(
+      (newAlerts) => {
+        console.log('[MapScreen] Received', newAlerts.length, 'active alerts');
+        setAlerts(newAlerts);
+      },
+      (error) => {
+        console.error('[MapScreen] Alert subscription error:', error);
+      }
+    );
+
+    // Cleanup: unsubscribe when component unmounts
+    return () => {
+      console.log('[MapScreen] Unsubscribing from alerts');
+      unsubscribe();
+    };
+  }, []);
+
+  // --- 2.6. LOAD SHELTERS FROM OVERPASS API ---
   useEffect(() => {
     let isMounted = true;
 
@@ -368,6 +446,137 @@ const MapScreen = () => {
      }
   };
 
+  // --- HANDLE MAP LONG PRESS (ADMIN ONLY) ---
+  const handleMapLongPress = useCallback((event: any) => {
+    if (!isAdmin) return; // Doar admin-ul poate crea alerte
+
+    const coordinates = event.geometry?.coordinates;
+    if (coordinates && coordinates.length >= 2) {
+      const [lng, lat] = coordinates;
+      console.log('[MapScreen] Admin long pressed at:', lat, lng);
+
+      setAlertTapLocation({ lat, lng });
+      setShowAlertForm(true);
+      setSelectedLocation(null); // Închide orice bottom sheet deschis
+      setShowFilterMenu(false);
+
+      // Centrează camera pe locația selectată
+      cameraRef.current?.setCamera({
+        centerCoordinate: [lng, lat],
+        zoomLevel: 14,
+        animationDuration: 500,
+        animationMode: 'flyTo',
+      });
+    }
+  }, [isAdmin]);
+
+  // --- HANDLE CREATE ALERT SUBMIT ---
+  const handleCreateAlert = useCallback(async () => {
+    if (!alertTapLocation) return;
+
+    const radiusNum = parseFloat(alertRadius);
+    const durationNum = parseFloat(alertDuration);
+
+    if (isNaN(radiusNum) || radiusNum <= 0) {
+      Alert.alert('Eroare', 'Introdu o rază validă (în km)');
+      return;
+    }
+    if (isNaN(durationNum) || durationNum <= 0) {
+      Alert.alert('Eroare', 'Introdu o durată validă (în ore)');
+      return;
+    }
+    if (!alertMessage.trim()) {
+      Alert.alert('Eroare', 'Introdu un mesaj pentru alertă');
+      return;
+    }
+
+    setIsCreatingAlert(true);
+
+    try {
+      const alertData = {
+        type: alertType,
+        severity: alertSeverity,
+        lat: alertTapLocation.lat,
+        lng: alertTapLocation.lng,
+        radius: radiusNum,
+        message: alertMessage.trim(),
+        timestamp: Date.now(),
+        expiresAt: Date.now() + durationNum * 60 * 60 * 1000, // ore -> ms
+        createdBy: 'admin',
+      };
+
+      await createAlert(alertData);
+
+      Alert.alert('Succes', 'Alerta a fost creată și trimisă!');
+
+      // Reset form
+      setShowAlertForm(false);
+      setAlertTapLocation(null);
+      setAlertMessage('');
+      setAlertRadius('1');
+      setAlertDuration('24');
+      setAlertType('fire');
+      setAlertSeverity('medium');
+    } catch (error) {
+      console.error('[MapScreen] Error creating alert:', error);
+      Alert.alert('Eroare', 'Nu s-a putut crea alerta. Verifică conexiunea.');
+    } finally {
+      setIsCreatingAlert(false);
+    }
+  }, [alertTapLocation, alertType, alertSeverity, alertMessage, alertRadius, alertDuration]);
+
+  // --- CANCEL ALERT FORM ---
+  const handleCancelAlert = useCallback(() => {
+    setShowAlertForm(false);
+    setAlertTapLocation(null);
+    setAlertMessage('');
+  }, []);
+
+  // --- HANDLE DELETE ALERT (admin only) ---
+  const handleDeleteAlert = useCallback(async (alertId: string) => {
+    Alert.alert(
+      'Șterge Alerta',
+      'Ești sigur că vrei să ștergi această alertă? Acțiunea este ireversibilă.',
+      [
+        { text: 'Anulează', style: 'cancel' },
+        {
+          text: 'Șterge',
+          style: 'destructive',
+          onPress: async () => {
+            setDeletingAlertId(alertId);
+            try {
+              await deleteAlert(alertId);
+              // If the deleted alert was selected, clear selection
+              if (selectedAlert?.id === alertId) {
+                setSelectedAlert(null);
+              }
+              Alert.alert('Succes', 'Alerta a fost ștearsă.');
+            } catch (error) {
+              console.error('[MapScreen] Error deleting alert:', error);
+              Alert.alert('Eroare', 'Nu s-a putut șterge alerta.');
+            } finally {
+              setDeletingAlertId(null);
+            }
+          },
+        },
+      ]
+    );
+  }, [selectedAlert]);
+
+  // --- HANDLE ALERT TAP (show details) ---
+  const handleAlertPress = useCallback((event: any) => {
+    const feature = event.features?.[0];
+    if (feature?.properties?.id) {
+      const alertId = feature.properties.id;
+      const alert = alerts.find(a => a.id === alertId);
+      if (alert) {
+        setSelectedAlert(alert);
+        setSelectedLocation(null); // Close shelter card if open
+        setShowFilterMenu(false);
+      }
+    }
+  }, [alerts]);
+
   const centerOnUser = () => {
     if (userLocation) {
       // Setăm și zoomLevel pe 15 când ne centrăm
@@ -489,13 +698,18 @@ const MapScreen = () => {
       <MapLibreGL.MapView
         style={styles.map}
         mapStyle={mapStyle ? JSON.stringify(mapStyle) : undefined}
-        surfaceView={false} 
+        surfaceView={false}
         logoEnabled={false}
         attributionEnabled={false}
         onPress={() => {
           setSelectedLocation(null);
+          setSelectedAlert(null);
           setShowFilterMenu(false);
+          if (!showAlertForm) {
+            setAlertTapLocation(null);
+          }
         }}
+        onLongPress={handleMapLongPress}
         // Adăugăm acest listener pentru a sincroniza zoom-ul când userul dă pinch
         onRegionDidChange={onRegionDidChange}
       >
@@ -520,29 +734,72 @@ const MapScreen = () => {
              </MapLibreGL.PointAnnotation>
         )}
 
-        {/* --- DISASTER ZONES --- */}
-        <MapLibreGL.ShapeSource
-          id="disasterSource"
-          shape={{
-            type: 'FeatureCollection',
-            features: DISASTER_ZONES.map(zone => ({
+        {/* --- ALERT ZONES FROM FIREBASE (real radius polygons) --- */}
+        {alerts.map(alert => (
+          <MapLibreGL.ShapeSource
+            key={`alert-${alert.id}`}
+            id={`alertSource-${alert.id}`}
+            shape={{
               type: 'Feature',
-              properties: {},
-              geometry: { type: 'Point', coordinates: [zone.lng, zone.lat] },
-            })),
-          }}
-        >
-          <MapLibreGL.CircleLayer
-            id="disasterCircles"
-            style={{
-              circleRadius: 60,
-              circleColor: 'rgba(231, 76, 60, 0.4)',
-              circleStrokeColor: 'rgba(231, 76, 60, 1)',
-              circleStrokeWidth: 2,
-              circleBlur: 0.2,
+              properties: {
+                id: alert.id,
+                type: alert.type,
+                severity: alert.severity,
+              },
+              geometry: {
+                type: 'Polygon',
+                coordinates: [createCirclePolygon(alert.lng, alert.lat, alert.radius)],
+              },
             }}
-          />
-        </MapLibreGL.ShapeSource>
+            onPress={handleAlertPress}
+          >
+            <MapLibreGL.FillLayer
+              id={`alertFill-${alert.id}`}
+              style={{
+                fillColor: ALERT_SEVERITY_LABELS[alert.severity].color,
+                fillOpacity: 0.25,
+              }}
+            />
+            <MapLibreGL.LineLayer
+              id={`alertLine-${alert.id}`}
+              style={{
+                lineColor: ALERT_SEVERITY_LABELS[alert.severity].color,
+                lineWidth: 2.5,
+                lineOpacity: 0.8,
+              }}
+            />
+          </MapLibreGL.ShapeSource>
+        ))}
+
+        {/* --- ALERT CENTER MARKERS --- */}
+        {alerts.map(alert => (
+          <MapLibreGL.PointAnnotation
+            key={`alertMarker-${alert.id}`}
+            id={`alertMarker-${alert.id}`}
+            coordinate={[alert.lng, alert.lat]}
+            onSelected={() => {
+              setSelectedAlert(alert);
+              setSelectedLocation(null);
+              setShowFilterMenu(false);
+            }}
+          >
+            <View style={[styles.alertMarker, { borderColor: ALERT_SEVERITY_LABELS[alert.severity].color }]}>
+              <Text style={styles.alertMarkerIcon}>{ALERT_TYPE_LABELS[alert.type].icon}</Text>
+            </View>
+          </MapLibreGL.PointAnnotation>
+        ))}
+
+        {/* --- ALERT TAP LOCATION MARKER (when creating) --- */}
+        {alertTapLocation && (
+          <MapLibreGL.PointAnnotation
+            id="alertTapMarker"
+            coordinate={[alertTapLocation.lng, alertTapLocation.lat]}
+          >
+            <View style={styles.alertTapMarker}>
+              <Text style={styles.alertTapMarkerText}>📍</Text>
+            </View>
+          </MapLibreGL.PointAnnotation>
+        )}
 
         {filteredShelters.map(renderShelterMarker)}
       </MapLibreGL.MapView>
@@ -562,8 +819,8 @@ const MapScreen = () => {
         </View>
       )}
 
-      {/* --- DATA SOURCE BADGE --- */}
-      <View style={styles.dataBadgeContainer}>
+      {/* --- DATA SOURCE BADGE & ALERTS BUTTON --- */}
+      <View style={styles.topLeftContainer}>
         {sheltersLoading ? (
           <View style={[styles.dataBadge, styles.dataBadgeLoading]}>
             <ActivityIndicator size="small" color="#666" />
@@ -588,6 +845,17 @@ const MapScreen = () => {
             <Text style={styles.dataBadgeRefresh}>🔄</Text>
           </TouchableOpacity>
         )}
+
+        {/* Active Alerts Button */}
+        <TouchableOpacity
+          style={[styles.alertsButton, alerts.length > 0 && styles.alertsButtonActive]}
+          onPress={() => setShowAlertsModal(true)}
+        >
+          <Text style={styles.alertsButtonIcon}>🚨</Text>
+          <Text style={styles.alertsButtonText}>
+            Alerte active ({alerts.length})
+          </Text>
+        </TouchableOpacity>
       </View>
 
       {/* --- BUTTONS --- */}
@@ -723,6 +991,316 @@ const MapScreen = () => {
           >
             <Text style={styles.navButtonText}>🧭 Navighează</Text>
           </TouchableOpacity>
+        </View>
+      )}
+
+      {/* --- ALERTS LIST MODAL --- */}
+      {showAlertsModal && (
+        <View style={styles.alertsModalOverlay}>
+          <TouchableOpacity
+            style={styles.alertsModalBackdrop}
+            onPress={() => setShowAlertsModal(false)}
+          />
+          <View style={styles.alertsModalContainer}>
+            <View style={styles.alertsModalHeader}>
+              <Text style={styles.alertsModalTitle}>🚨 Alerte Active</Text>
+              <TouchableOpacity
+                onPress={() => setShowAlertsModal(false)}
+                style={styles.alertsModalClose}
+              >
+                <Text style={styles.alertsModalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView
+              style={styles.alertsModalScroll}
+              contentContainerStyle={styles.alertsModalScrollContent}
+              showsVerticalScrollIndicator={true}
+            >
+              {alerts.length === 0 ? (
+                <View style={styles.alertsModalEmpty}>
+                  <Text style={styles.alertsModalEmptyIcon}>✅</Text>
+                  <Text style={styles.alertsModalEmptyText}>
+                    Nu există alerte active în acest moment.
+                  </Text>
+                </View>
+              ) : (
+                alerts.map((alert) => (
+                  <View key={alert.id} style={styles.alertCard}>
+                    <View style={styles.alertCardHeader}>
+                      <View
+                        style={[
+                          styles.alertCardBadge,
+                          { backgroundColor: ALERT_SEVERITY_LABELS[alert.severity].color },
+                        ]}
+                      >
+                        <Text style={styles.alertCardBadgeText}>
+                          {ALERT_TYPE_LABELS[alert.type].icon} {ALERT_TYPE_LABELS[alert.type].label}
+                        </Text>
+                      </View>
+                      <Text
+                        style={[
+                          styles.alertCardSeverity,
+                          { color: ALERT_SEVERITY_LABELS[alert.severity].color },
+                        ]}
+                      >
+                        {ALERT_SEVERITY_LABELS[alert.severity].label}
+                      </Text>
+                    </View>
+
+                    <Text style={styles.alertCardMessage}>{alert.message}</Text>
+
+                    <View style={styles.alertCardDetails}>
+                      <Text style={styles.alertCardDetail}>
+                        📍 {alert.lat.toFixed(4)}, {alert.lng.toFixed(4)}
+                      </Text>
+                      <Text style={styles.alertCardDetail}>
+                        📐 Rază: {alert.radius} km
+                      </Text>
+                      <Text style={styles.alertCardDetail}>
+                        ⏰ Expiră: {new Date(alert.expiresAt).toLocaleString('ro-RO', {
+                          day: '2-digit',
+                          month: '2-digit',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </Text>
+                    </View>
+
+                    <View style={styles.alertCardActions}>
+                      <TouchableOpacity
+                        style={styles.alertCardViewBtn}
+                        onPress={() => {
+                          setShowAlertsModal(false);
+                          setSelectedAlert(alert);
+                          cameraRef.current?.setCamera({
+                            centerCoordinate: [alert.lng, alert.lat],
+                            zoomLevel: 13,
+                            animationDuration: 800,
+                            animationMode: 'flyTo',
+                          });
+                        }}
+                      >
+                        <Text style={styles.alertCardViewBtnText}>Vezi pe hartă</Text>
+                      </TouchableOpacity>
+
+                      {isAdmin && (
+                        <TouchableOpacity
+                          style={[
+                            styles.alertCardDeleteBtn,
+                            deletingAlertId === alert.id && styles.alertCardDeleteBtnDisabled,
+                          ]}
+                          onPress={() => handleDeleteAlert(alert.id)}
+                          disabled={deletingAlertId === alert.id}
+                        >
+                          {deletingAlertId === alert.id ? (
+                            <ActivityIndicator color="#DC2626" size="small" />
+                          ) : (
+                            <Text style={styles.alertCardDeleteBtnText}>🗑️ Șterge</Text>
+                          )}
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </View>
+                ))
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      )}
+
+      {/* --- ADMIN ALERT FORM --- */}
+      {showAlertForm && alertTapLocation && (
+        <View style={styles.alertFormOverlay}>
+          <TouchableOpacity style={styles.alertFormBackdrop} onPress={handleCancelAlert} />
+          <View style={styles.alertFormContainer}>
+            <ScrollView
+              contentContainerStyle={styles.alertFormScrollContent}
+              showsVerticalScrollIndicator={true}
+              keyboardShouldPersistTaps="handled"
+              bounces={true}
+            >
+            <View style={styles.alertFormHeader}>
+              <Text style={styles.alertFormTitle}>🚨 Creare Alertă</Text>
+              <TouchableOpacity onPress={handleCancelAlert} style={styles.alertFormClose}>
+                <Text style={styles.alertFormCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.alertFormCoords}>
+              📍 {alertTapLocation.lat.toFixed(5)}, {alertTapLocation.lng.toFixed(5)}
+            </Text>
+
+            {/* Tip alertă */}
+            <Text style={styles.alertFormLabel}>Tip alertă</Text>
+            <View style={styles.alertTypeGrid}>
+              {(Object.keys(ALERT_TYPE_LABELS) as AlertType[]).map(type => {
+                const { label, icon, color } = ALERT_TYPE_LABELS[type];
+                const isSelected = alertType === type;
+                return (
+                  <TouchableOpacity
+                    key={type}
+                    style={[
+                      styles.alertTypeBtn,
+                      isSelected && { backgroundColor: color, borderColor: color },
+                    ]}
+                    onPress={() => setAlertType(type)}
+                  >
+                    <Text style={styles.alertTypeIcon}>{icon}</Text>
+                    <Text style={[styles.alertTypeLabel, isSelected && styles.alertTypeLabelSelected]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {/* Severitate */}
+            <Text style={styles.alertFormLabel}>Severitate</Text>
+            <View style={styles.severityRow}>
+              {(Object.keys(ALERT_SEVERITY_LABELS) as AlertSeverity[]).map(sev => {
+                const { label, color } = ALERT_SEVERITY_LABELS[sev];
+                const isSelected = alertSeverity === sev;
+                return (
+                  <TouchableOpacity
+                    key={sev}
+                    style={[
+                      styles.severityBtn,
+                      { borderColor: color },
+                      isSelected && { backgroundColor: color },
+                    ]}
+                    onPress={() => setAlertSeverity(sev)}
+                  >
+                    <Text style={[styles.severityLabel, isSelected && styles.severityLabelSelected]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {/* Mesaj */}
+            <Text style={styles.alertFormLabel}>Mesaj alertă</Text>
+            <TextInput
+              style={styles.alertInput}
+              placeholder="Descrie situația de urgență..."
+              placeholderTextColor="#999"
+              value={alertMessage}
+              onChangeText={setAlertMessage}
+              multiline
+              numberOfLines={3}
+            />
+
+            {/* Rază și Durată */}
+            <View style={styles.alertRowInputs}>
+              <View style={styles.alertHalfInput}>
+                <Text style={styles.alertFormLabel}>Rază (km)</Text>
+                <TextInput
+                  style={styles.alertInputSmall}
+                  placeholder="1"
+                  placeholderTextColor="#999"
+                  value={alertRadius}
+                  onChangeText={setAlertRadius}
+                  keyboardType="numeric"
+                />
+              </View>
+              <View style={styles.alertHalfInput}>
+                <Text style={styles.alertFormLabel}>Durată (ore)</Text>
+                <TextInput
+                  style={styles.alertInputSmall}
+                  placeholder="24"
+                  placeholderTextColor="#999"
+                  value={alertDuration}
+                  onChangeText={setAlertDuration}
+                  keyboardType="numeric"
+                />
+              </View>
+            </View>
+
+            {/* Butoane */}
+            <View style={styles.alertFormButtons}>
+              <TouchableOpacity
+                style={styles.alertCancelBtn}
+                onPress={handleCancelAlert}
+              >
+                <Text style={styles.alertCancelBtnText}>Anulează</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.alertSubmitBtn, isCreatingAlert && styles.alertSubmitBtnDisabled]}
+                onPress={handleCreateAlert}
+                disabled={isCreatingAlert}
+              >
+                {isCreatingAlert ? (
+                  <ActivityIndicator color="white" size="small" />
+                ) : (
+                  <Text style={styles.alertSubmitBtnText}>🚨 Trimite Alerta</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+          </View>
+        </View>
+      )}
+
+      {/* --- ALERT DETAILS CARD --- */}
+      {selectedAlert && !showAlertForm && (
+        <View style={styles.alertDetailCard}>
+          <View style={styles.alertDetailHeader}>
+            <View style={[styles.alertDetailBadge, { backgroundColor: ALERT_SEVERITY_LABELS[selectedAlert.severity].color }]}>
+              <Text style={styles.alertDetailBadgeText}>
+                {ALERT_TYPE_LABELS[selectedAlert.type].icon} {ALERT_TYPE_LABELS[selectedAlert.type].label}
+              </Text>
+            </View>
+            <TouchableOpacity onPress={() => setSelectedAlert(null)} style={styles.alertDetailClose}>
+              <Text style={styles.alertDetailCloseText}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={styles.alertDetailMessage}>{selectedAlert.message}</Text>
+
+          <View style={styles.alertDetailInfo}>
+            <View style={styles.alertDetailInfoItem}>
+              <Text style={styles.alertDetailInfoLabel}>Severitate</Text>
+              <Text style={[styles.alertDetailInfoValue, { color: ALERT_SEVERITY_LABELS[selectedAlert.severity].color }]}>
+                {ALERT_SEVERITY_LABELS[selectedAlert.severity].label}
+              </Text>
+            </View>
+            <View style={styles.alertDetailInfoItem}>
+              <Text style={styles.alertDetailInfoLabel}>Rază</Text>
+              <Text style={styles.alertDetailInfoValue}>{selectedAlert.radius} km</Text>
+            </View>
+            <View style={styles.alertDetailInfoItem}>
+              <Text style={styles.alertDetailInfoLabel}>Expiră</Text>
+              <Text style={styles.alertDetailInfoValue}>
+                {new Date(selectedAlert.expiresAt).toLocaleString('ro-RO', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  hour: '2-digit',
+                  minute: '2-digit'
+                })}
+              </Text>
+            </View>
+          </View>
+
+          {userLocation && (
+            <View style={styles.alertDetailDistance}>
+              <Text style={styles.alertDetailDistanceText}>
+                📍 La {formatDistance(calculateDistance(
+                  userLocation.latitude,
+                  userLocation.longitude,
+                  selectedAlert.lat,
+                  selectedAlert.lng
+                ))} de tine
+              </Text>
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* --- ADMIN MODE INDICATOR --- */}
+      {isAdmin && !showAlertForm && !selectedAlert && (
+        <View style={styles.adminModeIndicator}>
+          <Text style={styles.adminModeText}>👆 Ține apăsat pe hartă pentru a crea alertă</Text>
         </View>
       )}
     </View>
@@ -874,8 +1452,8 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(66, 133, 244, 0.3)',
   },
 
-  // Data source badge
-  dataBadgeContainer: {
+  // Top left container (data badge + alerts button)
+  topLeftContainer: {
     position: 'absolute',
     top: Platform.OS === 'ios' ? 60 : 45,
     left: 10,
@@ -924,6 +1502,189 @@ const styles = StyleSheet.create({
   dataBadgeRefresh: {
     fontSize: 14,
     marginLeft: 6,
+  },
+
+  // Alerts button
+  alertsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'white',
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginTop: 8,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  alertsButtonActive: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#DC2626',
+  },
+  alertsButtonIcon: {
+    fontSize: 14,
+    marginRight: 6,
+  },
+  alertsButtonText: {
+    fontSize: 12,
+    color: '#333',
+    fontWeight: '500',
+  },
+
+  // Alerts modal
+  alertsModalOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  alertsModalBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  alertsModalContainer: {
+    backgroundColor: 'white',
+    borderRadius: 20,
+    width: '90%',
+    maxHeight: '75%',
+    elevation: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+  },
+  alertsModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+  },
+  alertsModalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#1E293B',
+  },
+  alertsModalClose: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  alertsModalCloseText: {
+    fontSize: 16,
+    color: '#64748B',
+  },
+  alertsModalScroll: {
+    flexGrow: 0,
+  },
+  alertsModalScrollContent: {
+    padding: 16,
+  },
+  alertsModalEmpty: {
+    alignItems: 'center',
+    paddingVertical: 40,
+  },
+  alertsModalEmptyIcon: {
+    fontSize: 48,
+    marginBottom: 12,
+  },
+  alertsModalEmptyText: {
+    fontSize: 14,
+    color: '#64748B',
+    textAlign: 'center',
+  },
+
+  // Alert card
+  alertCard: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  alertCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  alertCardBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  alertCardBadgeText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  alertCardSeverity: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  alertCardMessage: {
+    fontSize: 14,
+    color: '#1E293B',
+    lineHeight: 20,
+    marginBottom: 10,
+  },
+  alertCardDetails: {
+    backgroundColor: 'white',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 10,
+  },
+  alertCardDetail: {
+    fontSize: 12,
+    color: '#64748B',
+    marginBottom: 4,
+  },
+  alertCardActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: 4,
+  },
+  alertCardViewBtn: {
+    backgroundColor: '#2563EB',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  alertCardViewBtnText: {
+    color: 'white',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  alertCardDeleteBtn: {
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  alertCardDeleteBtnDisabled: {
+    opacity: 0.5,
+  },
+  alertCardDeleteBtnText: {
+    color: '#DC2626',
+    fontSize: 13,
+    fontWeight: '600',
   },
 
   // Controls
@@ -1140,6 +1901,327 @@ const styles = StyleSheet.create({
     color: 'white',
     fontWeight: 'bold',
     fontSize: 16,
+  },
+
+  // Alert tap marker (when creating)
+  alertTapMarker: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  alertTapMarkerText: {
+    fontSize: 30,
+  },
+
+  // Alert marker on map
+  alertMarker: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'white',
+    borderWidth: 3,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+  },
+  alertMarkerIcon: {
+    fontSize: 18,
+  },
+
+  // Alert detail card
+  alertDetailCard: {
+    position: 'absolute',
+    bottom: Platform.OS === 'ios' ? 100 : 90,
+    left: 15,
+    right: 15,
+    backgroundColor: 'white',
+    padding: 16,
+    borderRadius: 15,
+    elevation: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  alertDetailHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  alertDetailBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+  alertDetailBadgeText: {
+    color: 'white',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  alertDetailClose: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  alertDetailCloseText: {
+    fontSize: 14,
+    color: '#64748B',
+  },
+  alertDetailMessage: {
+    fontSize: 15,
+    color: '#1E293B',
+    lineHeight: 22,
+    marginBottom: 12,
+  },
+  alertDetailInfo: {
+    flexDirection: 'row',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    padding: 12,
+  },
+  alertDetailInfoItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  alertDetailInfoLabel: {
+    fontSize: 11,
+    color: '#64748B',
+    marginBottom: 4,
+  },
+  alertDetailInfoValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#1E293B',
+  },
+  alertDetailDistance: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+    alignItems: 'center',
+  },
+  alertDetailDistanceText: {
+    fontSize: 14,
+    color: '#64748B',
+  },
+
+  // Admin mode indicator
+  adminModeIndicator: {
+    position: 'absolute',
+    bottom: Platform.OS === 'ios' ? 100 : 90,
+    left: 15,
+    right: 15,
+    backgroundColor: 'rgba(220, 38, 38, 0.9)',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  adminModeText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+
+  // Alert form overlay (full screen)
+  alertFormOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'flex-end',
+  },
+  alertFormBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.3)',
+  },
+  // Alert form container
+  alertFormContainer: {
+    backgroundColor: 'white',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '70%',
+    elevation: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 10,
+  },
+  alertFormScrollContent: {
+    padding: 20,
+    paddingBottom: Platform.OS === 'ios' ? 120 : 110,
+  },
+  alertFormHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  alertFormTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#1E293B',
+  },
+  alertFormClose: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  alertFormCloseText: {
+    fontSize: 18,
+    color: '#64748B',
+  },
+  alertFormCoords: {
+    fontSize: 12,
+    color: '#64748B',
+    marginBottom: 16,
+  },
+  alertFormLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#334155',
+    marginBottom: 8,
+    marginTop: 12,
+  },
+
+  // Alert type grid
+  alertTypeGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginHorizontal: -4,
+  },
+  alertTypeBtn: {
+    width: '31%',
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: '#E2E8F0',
+    backgroundColor: '#F8FAFC',
+    alignItems: 'center',
+    margin: 4,
+  },
+  alertTypeIcon: {
+    fontSize: 20,
+    marginBottom: 4,
+  },
+  alertTypeLabel: {
+    fontSize: 11,
+    color: '#64748B',
+    textAlign: 'center',
+  },
+  alertTypeLabelSelected: {
+    color: 'white',
+    fontWeight: '600',
+  },
+
+  // Severity row
+  severityRow: {
+    flexDirection: 'row',
+    marginHorizontal: -4,
+  },
+  severityBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 2,
+    alignItems: 'center',
+    backgroundColor: 'white',
+    marginHorizontal: 4,
+  },
+  severityLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  severityLabelSelected: {
+    color: 'white',
+  },
+
+  // Alert inputs
+  alertInput: {
+    backgroundColor: '#F1F5F9',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 14,
+    color: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    minHeight: 80,
+    textAlignVertical: 'top',
+  },
+  alertRowInputs: {
+    flexDirection: 'row',
+    marginHorizontal: -6,
+  },
+  alertHalfInput: {
+    flex: 1,
+    marginHorizontal: 6,
+  },
+  alertInputSmall: {
+    backgroundColor: '#F1F5F9',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 14,
+    color: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+
+  // Alert form buttons
+  alertFormButtons: {
+    flexDirection: 'row',
+    marginTop: 20,
+    marginHorizontal: -6,
+  },
+  alertCancelBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: '#E2E8F0',
+    alignItems: 'center',
+    marginHorizontal: 6,
+  },
+  alertCancelBtnText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#64748B',
+  },
+  alertSubmitBtn: {
+    flex: 2,
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: '#DC2626',
+    alignItems: 'center',
+    marginHorizontal: 6,
+  },
+  alertSubmitBtnDisabled: {
+    backgroundColor: '#94A3B8',
+  },
+  alertSubmitBtnText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: 'white',
   },
 });
 

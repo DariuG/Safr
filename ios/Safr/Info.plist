@@ -48,6 +48,15 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Safr folosește Bluetooth pentru a transmite alerte de dezastru către telefoanele din apropiere care nu au conexiune la internet.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Safr folosește Bluetooth pentru a transmite alerte de dezastru.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+		<string>bluetooth-peripheral</string>
+	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
 	<key>UIAppFonts</key>

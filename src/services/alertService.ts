@@ -14,7 +14,7 @@ import {
 } from '@react-native-firebase/firestore';
 
 // Alert types
-export type AlertType = 'earthquake' | 'flood' | 'fire' | 'storm' | 'chemical' | 'other';
+export type AlertType = 'earthquake' | 'flood' | 'fire' | 'storm' | 'war' | 'other';
 export type AlertSeverity = 'low' | 'medium' | 'high' | 'critical';
 
 export interface DisasterAlert {
@@ -38,7 +38,7 @@ export const ALERT_TYPE_LABELS: Record<AlertType, { label: string; icon: string;
   flood: { label: 'Inundație', icon: '🌊', color: '#1E90FF' },
   fire: { label: 'Incendiu', icon: '🔥', color: '#FF4500' },
   storm: { label: 'Furtună', icon: '⛈️', color: '#4B0082' },
-  chemical: { label: 'Pericol Chimic', icon: '☣️', color: '#32CD32' },
+  war: { label: 'Război', icon: '💣', color: '#4A4A4A' },
   other: { label: 'Altele', icon: '⚠️', color: '#FFD700' },
 };
 

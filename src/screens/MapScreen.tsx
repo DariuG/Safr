@@ -22,6 +22,7 @@ import {
   subscribeToAlerts,
   deleteAlert,
 } from '../services/alertService';
+import bleMeshService, { MeshStatus } from '../services/bleMeshService';
 
 // Helper function to create a circle polygon from center point and radius in km
 const createCirclePolygon = (centerLng: number, centerLat: number, radiusKm: number, points: number = 64): number[][] => {
@@ -72,6 +73,9 @@ const MapScreen = () => {
   const [selectedAlert, setSelectedAlert] = useState<DisasterAlert | null>(null);
   const [showAlertsModal, setShowAlertsModal] = useState(false);
   const [deletingAlertId, setDeletingAlertId] = useState<string | null>(null);
+
+  // BLE Mesh state
+  const [meshStatus, setMeshStatus] = useState<MeshStatus | null>(null);
 
   // Alert form fields
   const [alertType, setAlertType] = useState<AlertType>('fire');
@@ -309,6 +313,37 @@ const MapScreen = () => {
     return () => {
       console.log('[MapScreen] Unsubscribing from alerts');
       unsubscribe();
+    };
+  }, []);
+
+  // --- 2.55. BLE MESH AUTO-MODE ---
+  // Pornește mesh-ul automat. Monitorizează starea rețelei:
+  // - Cu internet: primește alerte Firebase + le advertisează prin BLE
+  // - Fără internet: scanează BLE pentru alerte de la vecini
+  useEffect(() => {
+    // Pornește auto-mode
+    bleMeshService.enableAutoMode().catch(err => {
+      console.warn('[MapScreen] BLE Mesh auto-mode failed:', err.message);
+    });
+
+    // Ascultă schimbări de stare mesh (pentru badge)
+    bleMeshService.onStatusChanged((status: MeshStatus) => {
+      setMeshStatus(status);
+    });
+
+    // Ascultă alerte primite prin BLE (de la telefoane din jur)
+    bleMeshService.onAlert((alert: DisasterAlert) => {
+      console.log('[MapScreen] Alert received via BLE:', alert.message);
+      // Adaugă alerta în lista de alerte (dacă nu e deja)
+      setAlerts(prev => {
+        const exists = prev.some(a => a.id === alert.id);
+        if (exists) { return prev; }
+        return [alert, ...prev];
+      });
+    });
+
+    return () => {
+      bleMeshService.disableAutoMode().catch(() => {});
     };
   }, []);
 
@@ -856,6 +891,24 @@ const MapScreen = () => {
             Alerte active ({alerts.length})
           </Text>
         </TouchableOpacity>
+
+        {/* BLE Mesh Status Badge */}
+        {meshStatus?.isRunning && (
+          <View style={[
+            styles.meshBadge,
+            meshStatus.isAdvertising && styles.meshBadgeAdvertising,
+          ]}>
+            <View style={[
+              styles.meshDot,
+              { backgroundColor: meshStatus.bluetoothState === 'on' ? '#22C55E' : '#EF4444' },
+            ]} />
+            <Text style={styles.meshBadgeText}>
+              BLE Mesh{meshStatus.devicesInRange > 0
+                ? ` • ${meshStatus.devicesInRange} disp.`
+                : ''}
+            </Text>
+          </View>
+        )}
       </View>
 
       {/* --- BUTTONS --- */}
@@ -1532,6 +1585,34 @@ const styles = StyleSheet.create({
   alertsButtonText: {
     fontSize: 12,
     color: '#333',
+    fontWeight: '500',
+  },
+
+  // BLE Mesh badge
+  meshBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginTop: 6,
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+  },
+  meshBadgeAdvertising: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#BFDBFE',
+  },
+  meshDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  meshBadgeText: {
+    fontSize: 11,
+    color: '#475569',
     fontWeight: '500',
   },
 

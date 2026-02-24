@@ -55,6 +55,16 @@ const ALERTS_COLLECTION = 'alerts';
 // Get Firestore instance
 const db = getFirestore();
 
+// Lazy import pentru a evita dependințe circulare
+// bleMeshService importă alertService, deci nu putem importa bleMeshService direct
+let _meshService: any = null;
+const getMeshService = () => {
+  if (!_meshService) {
+    _meshService = require('./bleMeshService').default;
+  }
+  return _meshService;
+};
+
 /**
  * Create a new disaster alert
  */
@@ -137,6 +147,16 @@ export const subscribeToAlerts = (
 
       console.log('[AlertService] Real-time update:', alerts.length, 'active alerts');
       onAlertsUpdate(alerts);
+
+      // Broadcast alertele către BLE mesh (pentru telefoanele fără internet din jur)
+      try {
+        const meshService = getMeshService();
+        for (const alert of alerts) {
+          meshService.broadcastAlert(alert);
+        }
+      } catch (e) {
+        // Mesh service nu e disponibil încă - OK, va fi pornit mai târziu
+      }
     },
     error => {
       console.error('[AlertService] Subscription error:', error);

@@ -22,11 +22,12 @@
 // ============================================================================
 
 #import <React/RCTBridgeModule.h>
+#import <React/RCTEventEmitter.h>
 
 // Înregistrează BleAdvertiserModule ca modul React Native
-// Al doilea parametru (NSObject) = clasa parinte din Swift
-// Al treilea (NO) = requiresMainQueueSetup: false
-RCT_EXTERN_MODULE(BleAdvertiserModule, NSObject)
+// Al doilea parametru (RCTEventEmitter) = clasa parinte din Swift
+// Necesar pentru ca NativeModules să găsească modulul
+RCT_EXTERN_MODULE(BleAdvertiserModule, RCTEventEmitter)
 
 // --- Metode expuse către JavaScript ---
 

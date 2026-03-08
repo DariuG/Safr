@@ -1,5 +1,6 @@
 import Foundation
 import CoreBluetooth
+import React
 
 // ============================================================================
 // BleAdvertiserModule - Modul nativ iOS pentru BLE Advertising + GATT Server
@@ -23,11 +24,22 @@ import CoreBluetooth
 //   Se deconectează
 // ============================================================================
 
-/// Macro-uri React Native pentru a expune clasa și metodele către JavaScript.
-/// @objc garantează că Swift-ul e vizibil din Objective-C (necesar pentru RN bridge).
-/// requiresMainQueueSetup() = false: modulul se inițializează pe background thread.
+/// @objc(BleAdvertiserModule) expune clasa Swift către Objective-C cu acest nume.
+/// Modulul extinde RCTEventEmitter (care extinde NSObject și conformează RCTBridgeModule)
+/// pentru ca React Native să-l poată găsi prin NativeModules.BleAdvertiserModule.
 @objc(BleAdvertiserModule)
-class BleAdvertiserModule: NSObject {
+class BleAdvertiserModule: RCTEventEmitter {
+
+  /// Returnează lista de evenimente suportate (obligatoriu pentru RCTEventEmitter).
+  /// Chiar dacă nu emitem evenimente acum, e necesar pentru conformare.
+  override func supportedEvents() -> [String]! {
+    return ["onBleStateChange"]
+  }
+
+  /// Previne warning-ul "Module requires main queue setup" de la RN.
+  override var methodQueue: DispatchQueue! {
+    return DispatchQueue(label: "com.safr.ble.module")
+  }
 
   // --------------------------------------------------------------------------
   // MARK: - UUIDs
@@ -71,7 +83,7 @@ class BleAdvertiserModule: NSObject {
 
   /// React Native apelează asta pentru a ști pe ce thread să inițializeze modulul.
   /// false = background thread (recomandat, nu blochează UI-ul).
-  @objc static func requiresMainQueueSetup() -> Bool {
+  @objc override static func requiresMainQueueSetup() -> Bool {
     return false
   }
 

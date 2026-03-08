@@ -68,7 +68,11 @@ const GATT_RETRY_BASE_DELAY_MS = 1000;
 
 // Referință la modulul nativ iOS (BleAdvertiserModule.swift)
 // NativeModules expune toate modulele native înregistrate prin bridge.
+// Pe Android (fără modul nativ) sau emulator, va fi null.
 const {BleAdvertiserModule} = NativeModules;
+
+/** True dacă modulul nativ BLE e disponibil (iOS fizic cu modul instalat). */
+const isNativeModuleAvailable = BleAdvertiserModule != null;
 
 // =============================================================================
 // SECȚIUNEA 2: Interfețe și Callback-uri

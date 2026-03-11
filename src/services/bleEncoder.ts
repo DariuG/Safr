@@ -11,8 +11,8 @@ import {AlertType, AlertSeverity, DisasterAlert} from './alertService';
 
 // --- Constants ---
 
-export const SAFR_SERVICE_UUID = '0000SAFE-0000-1000-8000-00805F9B34FB';
-export const ALERT_CHARACTERISTIC_UUID = '0000ALR1-0000-1000-8000-00805F9B34FB';
+export const SAFR_SERVICE_UUID = '00005AFE-0000-1000-8000-00805F9B34FB';
+export const ALERT_CHARACTERISTIC_UUID = '0000A1E1-0000-1000-8000-00805F9B34FB';
 export const BLE_COMPANY_ID = 0xffff; // Test/dev company ID
 export const COMPACT_ALERT_SIZE = 20;
 

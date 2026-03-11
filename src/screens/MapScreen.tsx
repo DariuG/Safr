@@ -321,27 +321,20 @@ const MapScreen = () => {
   // - Cu internet: primește alerte Firebase + le advertisează prin BLE
   // - Fără internet: scanează BLE pentru alerte de la vecini
   useEffect(() => {
-    // Pornește auto-mode
     bleMeshService.enableAutoMode().catch(err => {
       console.warn('[MapScreen] BLE Mesh auto-mode failed:', err.message);
     });
-
-    // Ascultă schimbări de stare mesh (pentru badge)
     bleMeshService.onStatusChanged((status: MeshStatus) => {
       setMeshStatus(status);
     });
-
-    // Ascultă alerte primite prin BLE (de la telefoane din jur)
     bleMeshService.onAlert((alert: DisasterAlert) => {
       console.log('[MapScreen] Alert received via BLE:', alert.message);
-      // Adaugă alerta în lista de alerte (dacă nu e deja)
       setAlerts(prev => {
         const exists = prev.some(a => a.id === alert.id);
         if (exists) { return prev; }
         return [alert, ...prev];
       });
     });
-
     return () => {
       bleMeshService.disableAutoMode().catch(() => {});
     };

@@ -68,11 +68,7 @@ const GATT_RETRY_BASE_DELAY_MS = 1000;
 
 // Referință la modulul nativ iOS (BleAdvertiserModule.swift)
 // NativeModules expune toate modulele native înregistrate prin bridge.
-// Pe Android (fără modul nativ) sau emulator, va fi null.
 const {BleAdvertiserModule} = NativeModules;
-
-/** True dacă modulul nativ BLE e disponibil (iOS fizic cu modul instalat). */
-const isNativeModuleAvailable = BleAdvertiserModule != null;
 
 // =============================================================================
 // SECȚIUNEA 2: Interfețe și Callback-uri
@@ -101,7 +97,7 @@ class BleMeshService {
 
   /** BleManager din react-native-ble-plx - folosit pentru scanning (descoperire
    *  dispozitive) și GATT client (citire date de la dispozitivele descoperite). */
-  private bleManager: BleManager;
+  private bleManager: BleManager | null = null;
 
   /** Deduplicatorul - previne procesarea aceleiași alerte de mai multe ori.
    *  Fără el, dacă 3 telefoane din jur emit aceeași alertă, am procesa-o de 3 ori. */
@@ -159,13 +155,22 @@ class BleMeshService {
   /** Callback-uri înregistrate de UI pentru schimbări de stare mesh. */
   private onStatusChange: ((status: MeshStatus) => void) | null = null;
 
+  /** Timer periodic pentru status update (asigură că UI-ul e mereu actualizat). */
+  private statusTimer: ReturnType<typeof setInterval> | null = null;
+
   // -------------------------------------------------------------------------
   // MARK: Constructor
   // -------------------------------------------------------------------------
 
   constructor() {
-    this.bleManager = new BleManager();
     this.deduplicator = new AlertDeduplicator();
+  }
+
+  private getBleManager(): BleManager {
+    if (!this.bleManager) {
+      this.bleManager = new BleManager();
+    }
+    return this.bleManager;
   }
 
   // =========================================================================
@@ -193,34 +198,42 @@ class BleMeshService {
       await BleAdvertiserModule.initialize();
       console.log('[BLE:MESH] Native module initialized');
 
-      // Pas 2: Ascultă schimbările de stare Bluetooth (on/off)
-      // Dacă utilizatorul oprește Bluetooth din Settings, mesh-ul se oprește grațios
-      this.stateSubscription = this.bleManager.onStateChange(state => {
-        console.log('[BLE:MESH] Bluetooth state changed:', state);
-        if (state === State.PoweredOn && this.isRunning && !this.isScanning) {
-          // Bluetooth repornit → reia scanarea
-          this.startScanning();
-        } else if (state === State.PoweredOff) {
-          this.isScanning = false;
-          this.isAdvertising = false;
-        }
-      }, true); // true = emit starea curentă imediat
-
       this.isRunning = true;
 
-      // Pas 3: Pornește scanarea
-      this.startScanning();
+      // Pas 2: Ascultă schimbările de stare Bluetooth (on/off) cu delay
+      // Amânăm subscripția la BleManager pentru a nu interfera cu permisiunile
+      setTimeout(() => {
+        if (!this.isRunning) return;
+        try {
+          this.stateSubscription = this.getBleManager().onStateChange(state => {
+            console.log('[BLE:MESH] Bluetooth state changed:', state);
+            if (state === State.PoweredOn && this.isRunning && !this.isScanning) {
+              this.startScanning();
+            } else if (state === State.PoweredOff) {
+              this.isScanning = false;
+              this.isAdvertising = false;
+            }
+            this.notifyStatusChange();
+          }, true);
+        } catch (e: any) {
+          console.warn('[BLE:MESH] Failed to subscribe to BLE state:', e.message);
+        }
+      }, 1000);
 
-      // Pas 4: Dacă avem deja alerte de advertisat, pornește advertising
+      // Notifică UI-ul după 2s (timp suficient ca BLE să raporteze starea)
+      setTimeout(() => {
+        this.notifyStatusChange();
+      }, 2000);
+
+      // Pas 3: Dacă avem deja alerte de advertisat, pornește advertising
       if (this.alertsToAdvertise.size > 0) {
         await this.startAdvertisingRotation();
       }
 
       console.log('[BLE:MESH] Mesh started successfully');
-    } catch (error) {
-      console.error('[BLE:MESH] Failed to start mesh:', error);
+    } catch (error: any) {
+      console.error('[BLE:MESH] Failed to start mesh:', error.message);
       this.isRunning = false;
-      throw error;
     }
   }
 
@@ -233,7 +246,7 @@ class BleMeshService {
     this.isRunning = false;
 
     // Oprește scanarea
-    this.bleManager.stopDeviceScan();
+    this.getBleManager().stopDeviceScan();
     this.isScanning = false;
 
     // Oprește advertising
@@ -388,6 +401,11 @@ class BleMeshService {
     );
 
     this.notifyStatusChange();
+
+    // Status polling la fiecare 5s pentru a ține UI-ul sincronizat
+    this.statusTimer = setInterval(() => {
+      this.notifyStatusChange();
+    }, 5000);
   }
 
   /**
@@ -396,6 +414,12 @@ class BleMeshService {
    */
   async disableAutoMode(): Promise<void> {
     this.autoModeEnabled = false;
+
+    // Oprește status polling
+    if (this.statusTimer) {
+      clearInterval(this.statusTimer);
+      this.statusTimer = null;
+    }
 
     // Dezabonare de la NetInfo
     this.netInfoUnsubscribe?.();
@@ -453,7 +477,8 @@ class BleMeshService {
 
     console.log('[BLE:SCAN] Starting scan for SAFR devices...');
 
-    this.bleManager.startDeviceScan(
+    try {
+    this.getBleManager().startDeviceScan(
       [SAFR_SERVICE_UUID], // Filtru pe UUID - doar dispozitive SAFR
       {
         allowDuplicates: false,
@@ -472,6 +497,9 @@ class BleMeshService {
     );
 
     this.isScanning = true;
+    } catch (err) {
+      console.error('[BLE:SCAN] Failed to start scanning:', err);
+    }
   }
 
   /**
@@ -797,7 +825,13 @@ class BleMeshService {
         );
       }
     } catch (error: any) {
-      console.error('[BLE:ADV] Advertising error:', error.message);
+      console.warn('[BLE:ADV] Advertising error:', error.message);
+      // Dacă BLE nu e încă poweredOn, reîncearcă după 2s
+      if (error.code === 'BLE_OFF' || error.message?.includes('not powered on')) {
+        setTimeout(() => {
+          this.advertiseCurrentAlert().catch(() => {});
+        }, 2000);
+      }
     }
   }
 

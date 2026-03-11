@@ -36,9 +36,10 @@ class BleAdvertiserModule: RCTEventEmitter {
     return ["onBleStateChange"]
   }
 
-  /// Previne warning-ul "Module requires main queue setup" de la RN.
+  /// Queue-ul pe care React Native apelează metodele acestui modul.
+  private static let moduleQueue = DispatchQueue(label: "com.safr.ble.module")
   override var methodQueue: DispatchQueue! {
-    return DispatchQueue(label: "com.safr.ble.module")
+    return BleAdvertiserModule.moduleQueue
   }
 
   // --------------------------------------------------------------------------
@@ -48,8 +49,8 @@ class BleAdvertiserModule: RCTEventEmitter {
   // Orice telefon care scanează pentru SAFR_SERVICE_UUID ne va găsi.
   // După conectare, va citi ALERT_CHARACTERISTIC_UUID pentru datele alertei.
 
-  private static let SAFR_SERVICE_UUID = CBUUID(string: "0000SAFE-0000-1000-8000-00805F9B34FB")
-  private static let ALERT_CHARACTERISTIC_UUID = CBUUID(string: "0000ALR1-0000-1000-8000-00805F9B34FB")
+  private static let SAFR_SERVICE_UUID = CBUUID(string: "00005AFE-0000-1000-8000-00805F9B34FB")
+  private static let ALERT_CHARACTERISTIC_UUID = CBUUID(string: "0000A1E1-0000-1000-8000-00805F9B34FB")
 
   // --------------------------------------------------------------------------
   // MARK: - Properties
@@ -101,11 +102,13 @@ class BleAdvertiserModule: RCTEventEmitter {
 
   @objc func initialize(_ resolve: @escaping RCTPromiseResolveBlock,
                         reject: @escaping RCTPromiseRejectBlock) {
+    NSLog("[BLE:ADV] initialize() called")
+
     let del = PeripheralManagerDelegate()
     self.delegate = del
 
-    // Callback: când CBPeripheralManager e gata (Bluetooth pornit/oprit)
     del.onStateUpdate = { [weak self] state in
+      NSLog("[BLE:ADV] State update: \(state.rawValue)")
       guard let self = self else { return }
       switch state {
       case .poweredOn:
@@ -115,21 +118,22 @@ class BleAdvertiserModule: RCTEventEmitter {
         NSLog("[BLE:ADV] Bluetooth is powered OFF")
         self.isAdvertising = false
       case .unauthorized:
-        NSLog("[BLE:ADV] Bluetooth unauthorized - check permissions")
+        NSLog("[BLE:ADV] Bluetooth unauthorized")
       case .unsupported:
-        NSLog("[BLE:ADV] BLE not supported on this device")
+        NSLog("[BLE:ADV] BLE not supported")
       default:
         NSLog("[BLE:ADV] Bluetooth state: \(state.rawValue)")
       }
     }
 
-    // Creează peripheral manager cu restore identifier pentru background support
+    del.onReadRequest = { [weak self] request in
+      self?.handleReadRequest(request)
+    }
+
+    let bleQueue = DispatchQueue(label: "com.safr.ble.peripheral")
     self.peripheralManager = CBPeripheralManager(
       delegate: del,
-      queue: DispatchQueue(label: "com.safr.ble.peripheral"),
-      options: [
-        CBPeripheralManagerOptionRestoreIdentifierKey: "SafrBLEPeripheral"
-      ]
+      queue: bleQueue
     )
 
     resolve(true)
@@ -467,14 +471,4 @@ class PeripheralManagerDelegate: NSObject, CBPeripheralManagerDelegate {
     onReadRequest?(request)
   }
 
-  // --------------------------------------------------------------------------
-  // Apelat când iOS restaurează starea după ce app-ul a fost omorât și relansat.
-  // Permite continuarea operațiunilor BLE fără intervenția utilizatorului.
-
-  func peripheralManager(_ peripheral: CBPeripheralManager,
-                         willRestoreState dict: [String: Any]) {
-    NSLog("[BLE:ADV] State restoration triggered")
-    // Serviciile publicate anterior sunt restaurate automat de iOS.
-    // Advertising-ul trebuie repornit manual de bleMeshService.ts.
-  }
 }

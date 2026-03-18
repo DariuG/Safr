@@ -86,6 +86,7 @@ export interface MeshStatus {
   devicesInRange: number;
   bluetoothState: string; // 'on' | 'off' | 'unauthorized' | 'unsupported' | 'unknown'
   activeAlertCount: number;
+  hasInternet: boolean;
 }
 
 // =============================================================================
@@ -126,8 +127,18 @@ class BleMeshService {
   /** Timer-ul pentru rotația alertelor. */
   private rotationTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** Set de device ID-uri descoperite recent (pentru numărare "devices in range"). */
-  private devicesInRange: Set<string> = new Set();
+  /** Map de device ID-uri → timestamp ultima apariție (pentru numărare "devices in range").
+   *  Folosim Map în loc de Set pentru a ști CÂT de recent a fost văzut fiecare device. */
+  private devicesInRange: Map<string, number> = new Map();
+
+  /** Interval de restart al scan-ului (resetează filtrul allowDuplicates). */
+  private scanRestartTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** Durata în ms cât un device e considerat "in range" după ultima apariție. */
+  private static readonly DEVICE_SEEN_TIMEOUT_MS = 60000; // 60s
+
+  /** Interval de restart scan (resetează allowDuplicates filter). */
+  private static readonly SCAN_RESTART_INTERVAL_MS = 35000; // 35s
 
   /** Subscription la schimbările de stare Bluetooth (on/off). */
   private stateSubscription: Subscription | null = null;
@@ -245,8 +256,9 @@ class BleMeshService {
 
     this.isRunning = false;
 
-    // Oprește scanarea
+    // Oprește scanarea + scan restart timer
     this.getBleManager().stopDeviceScan();
+    this.stopScanRestartTimer();
     this.isScanning = false;
 
     // Oprește advertising
@@ -262,7 +274,7 @@ class BleMeshService {
 
     // Curăță starea
     this.alertsToAdvertise.clear();
-    this.devicesInRange.clear();
+    this.devicesInRange = new Map();
     this.gattQueue = [];
     this.isProcessingGatt = false;
 
@@ -440,13 +452,26 @@ class BleMeshService {
       // Modulul nativ nu e inițializat încă
     }
 
+    // Calculează dispozitive active (văzute în ultimele DEVICE_SEEN_TIMEOUT_MS)
+    const now = Date.now();
+    let activeDevices = 0;
+    for (const [deviceId, lastSeen] of this.devicesInRange) {
+      if (now - lastSeen < BleMeshService.DEVICE_SEEN_TIMEOUT_MS) {
+        activeDevices++;
+      } else {
+        // Cleanup dispozitive expirate
+        this.devicesInRange.delete(deviceId);
+      }
+    }
+
     return {
       isRunning: this.isRunning,
       isScanning: this.isScanning,
       isAdvertising: this.isAdvertising,
-      devicesInRange: this.devicesInRange.size,
+      devicesInRange: activeDevices,
       bluetoothState,
       activeAlertCount: this.alertsToAdvertise.size,
+      hasInternet: this.hasInternet,
     };
   }
 
@@ -497,6 +522,31 @@ class BleMeshService {
     );
 
     this.isScanning = true;
+
+    // Restart periodic al scanării — resetează filtrul allowDuplicates
+    // astfel încât dispozitivele deja descoperite să fie re-raportate
+    // Asta menține devicesInRange actualizat și permite re-citire GATT
+    // dacă alerta advertisată s-a schimbat (rotație)
+    this.stopScanRestartTimer();
+    this.scanRestartTimer = setInterval(() => {
+      if (!this.isRunning || !this.isScanning) { return; }
+      console.log('[BLE:SCAN] Restarting scan to refresh device discovery...');
+      this.getBleManager().stopDeviceScan();
+      this.getBleManager().startDeviceScan(
+        [SAFR_SERVICE_UUID],
+        { allowDuplicates: false },
+        (error, device) => {
+          if (error) {
+            console.error('[BLE:SCAN] Scan error:', error.message);
+            return;
+          }
+          if (device) {
+            this.handleDiscoveredDevice(device);
+          }
+        },
+      );
+    }, BleMeshService.SCAN_RESTART_INTERVAL_MS);
+
     } catch (err) {
       console.error('[BLE:SCAN] Failed to start scanning:', err);
     }
@@ -525,12 +575,9 @@ class BleMeshService {
       `[BLE:SCAN] Discovered device: ${device.id} (name: ${device.localName || 'unknown'})`,
     );
 
-    // Tracking dispozitive în rază (pentru UI)
-    this.devicesInRange.add(device.id);
-
-    // Curăță dispozitivele vechi din "in range" la fiecare 30s
-    // (dispozitivele care au ieșit din rază nu mai emit, dar rămân în set)
-    setTimeout(() => this.devicesInRange.delete(device.id), 30000);
+    // Tracking dispozitive în rază (pentru UI) — actualizăm timestamp-ul
+    this.devicesInRange.set(device.id, Date.now());
+    this.notifyStatusChange();
 
     // Adaugă în coada GATT pentru procesare
     this.enqueueGattRead(device);
@@ -842,6 +889,16 @@ class BleMeshService {
     if (this.rotationTimer) {
       clearInterval(this.rotationTimer);
       this.rotationTimer = null;
+    }
+  }
+
+  /**
+   * Oprește timer-ul de restart al scanării.
+   */
+  private stopScanRestartTimer(): void {
+    if (this.scanRestartTimer) {
+      clearInterval(this.scanRestartTimer);
+      this.scanRestartTimer = null;
     }
   }
 }

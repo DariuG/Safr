@@ -67,6 +67,9 @@ const MapScreen = () => {
 
   // Alert state (pentru admin)
   const [alerts, setAlerts] = useState<DisasterAlert[]>([]);
+  // Counter incrementat la fiecare alertă BLE — forțează MapLibre să re-renderizeze
+  // ShapeSource-urile chiar dacă React nu detectează schimbarea corect
+  const [alertRenderKey, setAlertRenderKey] = useState(0);
   const [showAlertForm, setShowAlertForm] = useState(false);
   const [alertTapLocation, setAlertTapLocation] = useState<{lat: number, lng: number} | null>(null);
   const [isCreatingAlert, setIsCreatingAlert] = useState(false);
@@ -321,20 +324,51 @@ const MapScreen = () => {
   // - Cu internet: primește alerte Firebase + le advertisează prin BLE
   // - Fără internet: scanează BLE pentru alerte de la vecini
   useEffect(() => {
-    bleMeshService.enableAutoMode().catch(err => {
-      console.warn('[MapScreen] BLE Mesh auto-mode failed:', err.message);
-    });
+    // IMPORTANT: Setăm callback-urile ÎNAINTE de enableAutoMode()
+    // pentru a nu pierde evenimente dacă mesh-ul pornește rapid
     bleMeshService.onStatusChanged((status: MeshStatus) => {
       setMeshStatus(status);
     });
     bleMeshService.onAlert((alert: DisasterAlert) => {
       console.log('[MapScreen] Alert received via BLE:', alert.message);
-      setAlerts(prev => {
-        const exists = prev.some(a => a.id === alert.id);
-        if (exists) { return prev; }
-        return [alert, ...prev];
-      });
+      // setTimeout(0) forțează React să proceseze state update-ul
+      // chiar dacă callback-ul vine dintr-un context nativ async (BLE)
+      setTimeout(() => {
+        setAlerts(prev => {
+          const exists = prev.some(a => a.id === alert.id);
+          if (exists) { return prev; }
+          return [alert, ...prev];
+        });
+        // Forțează MapLibre re-render prin schimbarea key-ului
+        setAlertRenderKey(k => k + 1);
+        // Pop-up notificare la primirea alertei BLE
+        const typeLabel = ALERT_TYPE_LABELS[alert.type]?.label || alert.type;
+        const severityLabel = ALERT_SEVERITY_LABELS[alert.severity]?.label || alert.severity;
+        Alert.alert(
+          `${ALERT_TYPE_LABELS[alert.type]?.icon || '⚠️'} Alertă BLE Mesh`,
+          `${typeLabel} — Severitate: ${severityLabel}\n\n${alert.message}`,
+          [
+            {text: 'OK', style: 'cancel'},
+            {
+              text: 'Vezi pe hartă',
+              onPress: () => {
+                cameraRef.current?.setCamera({
+                  centerCoordinate: [alert.lng, alert.lat],
+                  zoomLevel: 13,
+                  animationDuration: 500,
+                });
+              },
+            },
+          ],
+        );
+      }, 0);
     });
+
+    // Acum pornim mesh-ul — callback-urile sunt deja înregistrate
+    bleMeshService.enableAutoMode().catch(err => {
+      console.warn('[MapScreen] BLE Mesh auto-mode failed:', err.message);
+    });
+
     return () => {
       bleMeshService.disableAutoMode().catch(() => {});
     };
@@ -762,10 +796,11 @@ const MapScreen = () => {
              </MapLibreGL.PointAnnotation>
         )}
 
-        {/* --- ALERT ZONES FROM FIREBASE (real radius polygons) --- */}
+        {/* --- ALERT ZONES (Firebase + BLE mesh) --- */}
+        {/* alertRenderKey forțează re-mount la alerte noi BLE */}
         {alerts.map(alert => (
           <MapLibreGL.ShapeSource
-            key={`alert-${alert.id}`}
+            key={`alert-${alert.id}-${alertRenderKey}`}
             id={`alertSource-${alert.id}`}
             shape={{
               type: 'Feature',
@@ -802,7 +837,7 @@ const MapScreen = () => {
         {/* --- ALERT CENTER MARKERS --- */}
         {alerts.map(alert => (
           <MapLibreGL.PointAnnotation
-            key={`alertMarker-${alert.id}`}
+            key={`alertMarker-${alert.id}-${alertRenderKey}`}
             id={`alertMarker-${alert.id}`}
             coordinate={[alert.lng, alert.lat]}
             onSelected={() => {
@@ -885,23 +920,47 @@ const MapScreen = () => {
           </Text>
         </TouchableOpacity>
 
-        {/* BLE Mesh Status Badge */}
-        {meshStatus?.isRunning && (
-          <View style={[
-            styles.meshBadge,
-            meshStatus.isAdvertising && styles.meshBadgeAdvertising,
-          ]}>
-            <View style={[
-              styles.meshDot,
-              { backgroundColor: meshStatus.bluetoothState === 'on' ? '#22C55E' : '#EF4444' },
-            ]} />
-            <Text style={styles.meshBadgeText}>
-              BLE Mesh{meshStatus.devicesInRange > 0
-                ? ` • ${meshStatus.devicesInRange} disp.`
-                : ''}
-            </Text>
-          </View>
-        )}
+        {/* BLE Mesh Status Badge — mereu vizibil */}
+        {(() => {
+          const btOff = !meshStatus || meshStatus.bluetoothState !== 'on';
+          const isOffline = meshStatus && !meshStatus.hasInternet;
+          const devices = meshStatus?.devicesInRange ?? 0;
+
+          // Stări vizuale:
+          // Roșu: BLE off sau mesh nu rulează
+          // Verde: offline mode (scanează + advertisează)
+          // Albastru: online mode (doar advertisează pentru vecini)
+          let badgeStyle = styles.meshBadgeOff;
+          let dotColor = '#EF4444'; // roșu default
+          let statusText = 'BLE Off';
+
+          if (meshStatus?.isRunning && !btOff) {
+            if (isOffline) {
+              // Offline: scanează + advertisează = verde
+              badgeStyle = styles.meshBadgeOffline;
+              dotColor = '#22C55E';
+              statusText = meshStatus.isScanning ? 'Mesh activ' : 'Mesh pornit';
+            } else {
+              // Online: doar advertisează = albastru
+              badgeStyle = styles.meshBadgeOnline;
+              dotColor = '#3B82F6';
+              statusText = meshStatus.isAdvertising ? 'Broadcast' : 'Mesh standby';
+            }
+          } else if (meshStatus?.isRunning && btOff) {
+            statusText = 'BLE oprit';
+          }
+
+          const deviceText = devices > 0 ? ` • ${devices} disp.` : '';
+
+          return (
+            <View style={[styles.meshBadge, badgeStyle]}>
+              <View style={[styles.meshDot, { backgroundColor: dotColor }]} />
+              <Text style={styles.meshBadgeText}>
+                {statusText}{deviceText}
+              </Text>
+            </View>
+          );
+        })()}
       </View>
 
       {/* --- BUTTONS --- */}
@@ -1583,17 +1642,23 @@ const styles = StyleSheet.create({
 
   // BLE Mesh badge
   meshBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F0FDF4',
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
     borderRadius: 20,
     paddingHorizontal: 10,
     paddingVertical: 6,
     marginTop: 6,
     borderWidth: 1,
+  },
+  meshBadgeOff: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
+  },
+  meshBadgeOffline: {
+    backgroundColor: '#F0FDF4',
     borderColor: '#BBF7D0',
   },
-  meshBadgeAdvertising: {
+  meshBadgeOnline: {
     backgroundColor: '#EFF6FF',
     borderColor: '#BFDBFE',
   },

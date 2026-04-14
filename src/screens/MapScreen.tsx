@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ActivityIndicator, PermissionsAndroid, Linking, TextInput, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ActivityIndicator, PermissionsAndroid, Linking, TextInput, ScrollView, KeyboardAvoidingView, Keyboard } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import RNFS from 'react-native-fs';
 import Geolocation from 'react-native-geolocation-service';
@@ -111,6 +111,34 @@ const MapScreen = () => {
   );
 
   const cameraRef = useRef<MapLibreGL.CameraRef>(null);
+
+  // Set de alert ID-uri deja cunoscute — popup doar pentru cele NOI
+  const knownAlertIds = useRef<Set<string>>(new Set());
+  // La primul snapshot Firebase, populăm fără popup (sunt alerte existente)
+  const isFirstSnapshot = useRef(true);
+
+  // Funcție comună de popup — folosită atât de Firebase cât și de BLE
+  const showAlertPopup = useCallback((alert: DisasterAlert) => {
+    const typeLabel = ALERT_TYPE_LABELS[alert.type]?.label || alert.type;
+    const severityLabel = ALERT_SEVERITY_LABELS[alert.severity]?.label || alert.severity;
+    Alert.alert(
+      `${ALERT_TYPE_LABELS[alert.type]?.icon || ''} Alerta noua`,
+      `${typeLabel} — Severitate: ${severityLabel}\n\n${alert.message}`,
+      [
+        {text: 'OK', style: 'cancel'},
+        {
+          text: 'Vezi pe harta',
+          onPress: () => {
+            cameraRef.current?.setCamera({
+              centerCoordinate: [alert.lng, alert.lat],
+              zoomLevel: 13,
+              animationDuration: 500,
+            });
+          },
+        },
+      ],
+    );
+  }, []);
 
   // --- 1. SETUP HARTA OFFLINE ---
   useEffect(() => {
@@ -306,6 +334,20 @@ const MapScreen = () => {
       (newAlerts) => {
         console.log('[MapScreen] Received', newAlerts.length, 'active alerts');
         setAlerts(newAlerts);
+
+        if (isFirstSnapshot.current) {
+          // Primul snapshot: populăm Set-ul cu alertele existente, fără popup
+          newAlerts.forEach(a => knownAlertIds.current.add(a.id));
+          isFirstSnapshot.current = false;
+        } else {
+          // Snapshot-uri ulterioare: popup pentru alertele noi
+          newAlerts.forEach(a => {
+            if (!knownAlertIds.current.has(a.id)) {
+              knownAlertIds.current.add(a.id);
+              showAlertPopup(a);
+            }
+          });
+        }
       },
       (error) => {
         console.error('[MapScreen] Alert subscription error:', error);
@@ -317,7 +359,7 @@ const MapScreen = () => {
       console.log('[MapScreen] Unsubscribing from alerts');
       unsubscribe();
     };
-  }, []);
+  }, [showAlertPopup]);
 
   // --- 2.55. BLE MESH AUTO-MODE ---
   // Pornește mesh-ul automat. Monitorizează starea rețelei:
@@ -331,36 +373,18 @@ const MapScreen = () => {
     });
     bleMeshService.onAlert((alert: DisasterAlert) => {
       console.log('[MapScreen] Alert received via BLE:', alert.message);
-      // setTimeout(0) forțează React să proceseze state update-ul
-      // chiar dacă callback-ul vine dintr-un context nativ async (BLE)
       setTimeout(() => {
         setAlerts(prev => {
           const exists = prev.some(a => a.id === alert.id);
           if (exists) { return prev; }
           return [alert, ...prev];
         });
-        // Forțează MapLibre re-render prin schimbarea key-ului
         setAlertRenderKey(k => k + 1);
-        // Pop-up notificare la primirea alertei BLE
-        const typeLabel = ALERT_TYPE_LABELS[alert.type]?.label || alert.type;
-        const severityLabel = ALERT_SEVERITY_LABELS[alert.severity]?.label || alert.severity;
-        Alert.alert(
-          `${ALERT_TYPE_LABELS[alert.type]?.icon || '⚠️'} Alertă BLE Mesh`,
-          `${typeLabel} — Severitate: ${severityLabel}\n\n${alert.message}`,
-          [
-            {text: 'OK', style: 'cancel'},
-            {
-              text: 'Vezi pe hartă',
-              onPress: () => {
-                cameraRef.current?.setCamera({
-                  centerCoordinate: [alert.lng, alert.lat],
-                  zoomLevel: 13,
-                  animationDuration: 500,
-                });
-              },
-            },
-          ],
-        );
+        // Popup doar dacă nu am mai văzut-o (poate a venit și prin Firebase)
+        if (!knownAlertIds.current.has(alert.id)) {
+          knownAlertIds.current.add(alert.id);
+          showAlertPopup(alert);
+        }
       }, 0);
     });
 
@@ -1217,7 +1241,11 @@ const MapScreen = () => {
       {/* --- ADMIN ALERT FORM --- */}
       {showAlertForm && alertTapLocation && (
         <View style={styles.alertFormOverlay}>
-          <TouchableOpacity style={styles.alertFormBackdrop} onPress={handleCancelAlert} />
+          <TouchableOpacity style={styles.alertFormBackdrop} onPress={() => { Keyboard.dismiss(); handleCancelAlert(); }} />
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={styles.alertFormKeyboardView}
+          >
           <View style={styles.alertFormContainer}>
             <ScrollView
               contentContainerStyle={styles.alertFormScrollContent}
@@ -1225,19 +1253,21 @@ const MapScreen = () => {
               keyboardShouldPersistTaps="handled"
               bounces={true}
             >
+            {/* Header compact: titlu + coordonate + close */}
             <View style={styles.alertFormHeader}>
-              <Text style={styles.alertFormTitle}>🚨 Creare Alertă</Text>
-              <TouchableOpacity onPress={handleCancelAlert} style={styles.alertFormClose}>
+              <View>
+                <Text style={styles.alertFormTitle}>Creare Alerta</Text>
+                <Text style={styles.alertFormCoords}>
+                  📍 {alertTapLocation.lat.toFixed(5)}, {alertTapLocation.lng.toFixed(5)}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => { Keyboard.dismiss(); handleCancelAlert(); }} style={styles.alertFormClose}>
                 <Text style={styles.alertFormCloseText}>✕</Text>
               </TouchableOpacity>
             </View>
 
-            <Text style={styles.alertFormCoords}>
-              📍 {alertTapLocation.lat.toFixed(5)}, {alertTapLocation.lng.toFixed(5)}
-            </Text>
-
-            {/* Tip alertă */}
-            <Text style={styles.alertFormLabel}>Tip alertă</Text>
+            {/* Tip alertă — grid compact */}
+            <Text style={styles.alertFormLabel}>Tip alerta</Text>
             <View style={styles.alertTypeGrid}>
               {(Object.keys(ALERT_TYPE_LABELS) as AlertType[]).map(type => {
                 const { label, icon, color } = ALERT_TYPE_LABELS[type];
@@ -1260,7 +1290,7 @@ const MapScreen = () => {
               })}
             </View>
 
-            {/* Severitate */}
+            {/* Severitate — butoane cu fill */}
             <Text style={styles.alertFormLabel}>Severitate</Text>
             <View style={styles.severityRow}>
               {(Object.keys(ALERT_SEVERITY_LABELS) as AlertSeverity[]).map(sev => {
@@ -1271,12 +1301,16 @@ const MapScreen = () => {
                     key={sev}
                     style={[
                       styles.severityBtn,
-                      { borderColor: color },
+                      { backgroundColor: color + '20', borderColor: color },
                       isSelected && { backgroundColor: color },
                     ]}
                     onPress={() => setAlertSeverity(sev)}
                   >
-                    <Text style={[styles.severityLabel, isSelected && styles.severityLabelSelected]}>
+                    <Text style={[
+                      styles.severityLabel,
+                      { color: color },
+                      isSelected && styles.severityLabelSelected,
+                    ]}>
                       {label}
                     </Text>
                   </TouchableOpacity>
@@ -1284,22 +1318,22 @@ const MapScreen = () => {
               })}
             </View>
 
-            {/* Mesaj */}
-            <Text style={styles.alertFormLabel}>Mesaj alertă</Text>
+            {/* Mesaj — compact */}
+            <Text style={styles.alertFormLabel}>Mesaj alerta</Text>
             <TextInput
               style={styles.alertInput}
-              placeholder="Descrie situația de urgență..."
+              placeholder="Descrie situatia de urgenta..."
               placeholderTextColor="#999"
               value={alertMessage}
               onChangeText={setAlertMessage}
               multiline
-              numberOfLines={3}
+              numberOfLines={2}
             />
 
-            {/* Rază și Durată */}
+            {/* Rază și Durată — pe același rând */}
             <View style={styles.alertRowInputs}>
               <View style={styles.alertHalfInput}>
-                <Text style={styles.alertFormLabel}>Rază (km)</Text>
+                <Text style={styles.alertFormLabel}>Raza (km)</Text>
                 <TextInput
                   style={styles.alertInputSmall}
                   placeholder="1"
@@ -1310,7 +1344,7 @@ const MapScreen = () => {
                 />
               </View>
               <View style={styles.alertHalfInput}>
-                <Text style={styles.alertFormLabel}>Durată (ore)</Text>
+                <Text style={styles.alertFormLabel}>Durata (ore)</Text>
                 <TextInput
                   style={styles.alertInputSmall}
                   placeholder="24"
@@ -1326,9 +1360,9 @@ const MapScreen = () => {
             <View style={styles.alertFormButtons}>
               <TouchableOpacity
                 style={styles.alertCancelBtn}
-                onPress={handleCancelAlert}
+                onPress={() => { Keyboard.dismiss(); handleCancelAlert(); }}
               >
-                <Text style={styles.alertCancelBtnText}>Anulează</Text>
+                <Text style={styles.alertCancelBtnText}>Anuleaza</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.alertSubmitBtn, isCreatingAlert && styles.alertSubmitBtnDisabled]}
@@ -1338,12 +1372,13 @@ const MapScreen = () => {
                 {isCreatingAlert ? (
                   <ActivityIndicator color="white" size="small" />
                 ) : (
-                  <Text style={styles.alertSubmitBtnText}>🚨 Trimite Alerta</Text>
+                  <Text style={styles.alertSubmitBtnText}>Trimite Alerta</Text>
                 )}
               </TouchableOpacity>
             </View>
           </ScrollView>
           </View>
+          </KeyboardAvoidingView>
         </View>
       )}
 
@@ -1403,9 +1438,9 @@ const MapScreen = () => {
       )}
 
       {/* --- ADMIN MODE INDICATOR --- */}
-      {isAdmin && !showAlertForm && !selectedAlert && (
+      {isAdmin && !showAlertForm && !selectedAlert && !selectedLocation && (
         <View style={styles.adminModeIndicator}>
-          <Text style={styles.adminModeText}>👆 Ține apăsat pe hartă pentru a crea alertă</Text>
+          <Text style={styles.adminModeText}>Ține apăsat pe hartă pentru a crea alertă</Text>
         </View>
       )}
     </View>
@@ -2188,12 +2223,14 @@ const styles = StyleSheet.create({
     bottom: 0,
     backgroundColor: 'rgba(0,0,0,0.3)',
   },
-  // Alert form container
+  alertFormKeyboardView: {
+    justifyContent: 'flex-end' as const,
+  },
   alertFormContainer: {
     backgroundColor: 'white',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    maxHeight: '70%',
+    maxHeight: '75%',
     elevation: 20,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: -4 },
@@ -2201,165 +2238,163 @@ const styles = StyleSheet.create({
     shadowRadius: 10,
   },
   alertFormScrollContent: {
-    padding: 20,
-    paddingBottom: Platform.OS === 'ios' ? 120 : 110,
+    padding: 16,
+    paddingBottom: Platform.OS === 'ios' ? 50 : 80,
   },
   alertFormHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
+    flexDirection: 'row' as const,
+    justifyContent: 'space-between' as const,
+    alignItems: 'flex-start' as const,
+    marginBottom: 8,
   },
   alertFormTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
+    fontSize: 18,
+    fontWeight: 'bold' as const,
     color: '#1E293B',
   },
   alertFormClose: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     backgroundColor: '#F1F5F9',
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
   },
   alertFormCloseText: {
-    fontSize: 18,
+    fontSize: 16,
     color: '#64748B',
   },
   alertFormCoords: {
-    fontSize: 12,
-    color: '#64748B',
-    marginBottom: 16,
+    fontSize: 11,
+    color: '#94A3B8',
+    marginTop: 2,
   },
   alertFormLabel: {
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: 13,
+    fontWeight: '600' as const,
     color: '#334155',
-    marginBottom: 8,
-    marginTop: 12,
+    marginBottom: 6,
+    marginTop: 10,
   },
 
-  // Alert type grid
+  // Alert type grid — compact
   alertTypeGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginHorizontal: -4,
+    flexDirection: 'row' as const,
+    flexWrap: 'wrap' as const,
+    marginHorizontal: -3,
   },
   alertTypeBtn: {
     width: '31%',
-    paddingVertical: 10,
-    paddingHorizontal: 8,
-    borderRadius: 10,
-    borderWidth: 2,
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderRadius: 8,
+    borderWidth: 1.5,
     borderColor: '#E2E8F0',
     backgroundColor: '#F8FAFC',
-    alignItems: 'center',
-    margin: 4,
+    alignItems: 'center' as const,
+    margin: 3,
   },
   alertTypeIcon: {
-    fontSize: 20,
-    marginBottom: 4,
+    fontSize: 18,
+    marginBottom: 2,
   },
   alertTypeLabel: {
-    fontSize: 11,
+    fontSize: 10,
     color: '#64748B',
-    textAlign: 'center',
+    textAlign: 'center' as const,
   },
   alertTypeLabelSelected: {
     color: 'white',
-    fontWeight: '600',
+    fontWeight: '600' as const,
   },
 
-  // Severity row
+  // Severity row — all with fill
   severityRow: {
-    flexDirection: 'row',
-    marginHorizontal: -4,
+    flexDirection: 'row' as const,
+    marginHorizontal: -3,
   },
   severityBtn: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: 8,
     borderRadius: 8,
-    borderWidth: 2,
-    alignItems: 'center',
-    backgroundColor: 'white',
-    marginHorizontal: 4,
+    borderWidth: 1.5,
+    alignItems: 'center' as const,
+    marginHorizontal: 3,
   },
   severityLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#64748B',
+    fontSize: 11,
+    fontWeight: '600' as const,
   },
   severityLabelSelected: {
     color: 'white',
   },
 
-  // Alert inputs
+  // Alert inputs — compact
   alertInput: {
     backgroundColor: '#F1F5F9',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     fontSize: 14,
     color: '#1E293B',
     borderWidth: 1,
     borderColor: '#E2E8F0',
-    minHeight: 80,
-    textAlignVertical: 'top',
+    minHeight: 60,
+    textAlignVertical: 'top' as const,
   },
   alertRowInputs: {
-    flexDirection: 'row',
-    marginHorizontal: -6,
+    flexDirection: 'row' as const,
+    marginHorizontal: -4,
   },
   alertHalfInput: {
     flex: 1,
-    marginHorizontal: 6,
+    marginHorizontal: 4,
   },
   alertInputSmall: {
     backgroundColor: '#F1F5F9',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     fontSize: 14,
     color: '#1E293B',
     borderWidth: 1,
     borderColor: '#E2E8F0',
   },
 
-  // Alert form buttons
+  // Alert form buttons — compact
   alertFormButtons: {
-    flexDirection: 'row',
-    marginTop: 20,
-    marginHorizontal: -6,
+    flexDirection: 'row' as const,
+    marginTop: 14,
+    marginHorizontal: -4,
   },
   alertCancelBtn: {
     flex: 1,
-    paddingVertical: 14,
-    borderRadius: 10,
-    borderWidth: 2,
+    paddingVertical: 12,
+    borderRadius: 8,
+    borderWidth: 1.5,
     borderColor: '#E2E8F0',
-    alignItems: 'center',
-    marginHorizontal: 6,
+    alignItems: 'center' as const,
+    marginHorizontal: 4,
   },
   alertCancelBtnText: {
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 14,
+    fontWeight: '600' as const,
     color: '#64748B',
   },
   alertSubmitBtn: {
-    flex: 2,
-    paddingVertical: 14,
-    borderRadius: 10,
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
     backgroundColor: '#DC2626',
-    alignItems: 'center',
-    marginHorizontal: 6,
+    alignItems: 'center' as const,
+    marginHorizontal: 4,
   },
   alertSubmitBtnDisabled: {
     backgroundColor: '#94A3B8',
   },
   alertSubmitBtnText: {
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 14,
+    fontWeight: '600' as const,
     color: 'white',
   },
 });

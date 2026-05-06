@@ -1,97 +1,117 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
-// Hardcoded admin credentials (for development)
-const ADMIN_CREDENTIALS = {
-  username: 'admin',
-  password: 'safr2024',
-};
+import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect } from 'react';
+import {
+  getAuth,
+  signInWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  FirebaseAuthTypes,
+} from '@react-native-firebase/auth';
+import { getFirestore, doc, getDoc } from '@react-native-firebase/firestore';
 
 interface AuthContextType {
   isAdmin: boolean;
   isLoading: boolean;
-  login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  user: FirebaseAuthTypes.User | null;
+  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
-  checkAuthStatus: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const AUTH_STORAGE_KEY = '@safr_admin_auth';
+const auth = getAuth();
+const db = getFirestore();
+
+// Verifică dacă UID-ul curent e în colecția `admins`
+const checkIsAdmin = async (uid: string): Promise<boolean> => {
+  try {
+    const adminRef = doc(db, 'admins', uid);
+    const snap = await getDoc(adminRef);
+    return snap.exists();
+  } catch (error) {
+    console.error('[AuthContext] Error checking admin status:', error);
+    return false;
+  }
+};
+
+// Traducere erori Firebase în mesaje user-friendly
+const getFirebaseErrorMessage = (code: string): string => {
+  switch (code) {
+    case 'auth/invalid-email':
+      return 'Adresa de email este invalidă.';
+    case 'auth/user-disabled':
+      return 'Acest cont a fost dezactivat.';
+    case 'auth/user-not-found':
+    case 'auth/wrong-password':
+    case 'auth/invalid-credential':
+      return 'Email sau parolă incorecte.';
+    case 'auth/too-many-requests':
+      return 'Prea multe încercări. Reîncearcă mai târziu.';
+    case 'auth/network-request-failed':
+      return 'Eroare de rețea. Verifică conexiunea.';
+    default:
+      return 'Autentificare eșuată. Reîncearcă.';
+  }
+};
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<FirebaseAuthTypes.User | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Check if admin is already logged in (on app start)
-  const checkAuthStatus = useCallback(async () => {
-    try {
-      const authData = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
-      if (authData) {
-        const { isAdmin: storedIsAdmin, expiry } = JSON.parse(authData);
-        // Check if session is still valid (24 hours)
-        if (storedIsAdmin && expiry && Date.now() < expiry) {
-          setIsAdmin(true);
-        } else {
-          // Session expired, clear it
-          await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
-          setIsAdmin(false);
-        }
-      }
-    } catch (error) {
-      console.error('[AuthContext] Error checking auth status:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  // Login function
-  const login = useCallback(async (username: string, password: string): Promise<{ success: boolean; error?: string }> => {
-    try {
-      // Validate credentials
-      if (username === ADMIN_CREDENTIALS.username && password === ADMIN_CREDENTIALS.password) {
-        // Store auth status with 24-hour expiry
-        const authData = {
-          isAdmin: true,
-          expiry: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
-        };
-        await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authData));
-        setIsAdmin(true);
-        console.log('[AuthContext] Admin logged in successfully');
-        return { success: true };
+  // Auth state listener — se apelează la login, logout, și la pornirea app-ului
+  // (Firebase persistă sesiunea automat între restart-uri)
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      setUser(fbUser);
+      if (fbUser) {
+        const adminStatus = await checkIsAdmin(fbUser.uid);
+        setIsAdmin(adminStatus);
+        console.log('[AuthContext] User authenticated:', fbUser.email, 'isAdmin:', adminStatus);
       } else {
-        return { success: false, error: 'Credențiale invalide' };
+        setIsAdmin(false);
+        console.log('[AuthContext] No user authenticated');
       }
-    } catch (error) {
-      console.error('[AuthContext] Login error:', error);
-      return { success: false, error: 'Eroare la autentificare' };
+      setIsLoading(false);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  const login = useCallback(async (email: string, password: string) => {
+    try {
+      const credential = await signInWithEmailAndPassword(auth, email.trim(), password);
+      const adminStatus = await checkIsAdmin(credential.user.uid);
+
+      if (!adminStatus) {
+        // User autentificat dar NU e admin — delogăm imediat
+        await signOut(auth);
+        return { success: false, error: 'Acest cont nu are drepturi de administrator.' };
+      }
+
+      console.log('[AuthContext] Admin logged in:', credential.user.email);
+      return { success: true };
+    } catch (error: any) {
+      console.error('[AuthContext] Login error:', error.code, error.message);
+      return { success: false, error: getFirebaseErrorMessage(error.code) };
     }
   }, []);
 
-  // Logout function
   const logout = useCallback(async () => {
     try {
-      await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
-      setIsAdmin(false);
-      console.log('[AuthContext] Admin logged out');
+      await signOut(auth);
+      console.log('[AuthContext] User logged out');
     } catch (error) {
       console.error('[AuthContext] Logout error:', error);
     }
   }, []);
 
-  // Check auth status on mount
-  React.useEffect(() => {
-    checkAuthStatus();
-  }, [checkAuthStatus]);
-
   return (
-    <AuthContext.Provider value={{ isAdmin, isLoading, login, logout, checkAuthStatus }}>
+    <AuthContext.Provider value={{ isAdmin, isLoading, user, login, logout }}>
       {children}
     </AuthContext.Provider>
   );
 };
 
-// Custom hook to use auth context
 export const useAuth = (): AuthContextType => {
   const context = useContext(AuthContext);
   if (context === undefined) {

@@ -18,21 +18,27 @@ interface AdminLoginScreenProps {
 }
 
 const AdminLoginScreen: React.FC<AdminLoginScreenProps> = ({ navigation }) => {
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const { login } = useAuth();
 
+  const isValidEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+
   const handleLogin = async () => {
-    if (!username.trim() || !password.trim()) {
+    if (!email.trim() || !password.trim()) {
       Alert.alert('Eroare', 'Completează toate câmpurile');
+      return;
+    }
+    if (!isValidEmail(email)) {
+      Alert.alert('Eroare', 'Adresa de email nu este validă');
       return;
     }
 
     setIsLoggingIn(true);
 
     try {
-      const result = await login(username.trim(), password);
+      const result = await login(email.trim(), password);
 
       if (result.success) {
         Alert.alert('Succes', 'Autentificare reușită!', [
@@ -60,7 +66,6 @@ const AdminLoginScreen: React.FC<AdminLoginScreenProps> = ({ navigation }) => {
         <View style={styles.content}>
           {/* Header */}
           <View style={styles.header}>
-            <Text style={styles.icon}>🔐</Text>
             <Text style={styles.title}>Admin Login</Text>
             <Text style={styles.subtitle}>
               Autentifică-te pentru a gestiona alertele de urgență
@@ -70,15 +75,17 @@ const AdminLoginScreen: React.FC<AdminLoginScreenProps> = ({ navigation }) => {
           {/* Form */}
           <View style={styles.form}>
             <View style={styles.inputContainer}>
-              <Text style={styles.label}>Utilizator</Text>
+              <Text style={styles.label}>Email</Text>
               <TextInput
                 style={styles.input}
-                placeholder="Introdu utilizatorul"
+                placeholder="email@exemplu.ro"
                 placeholderTextColor="#94A3B8"
-                value={username}
-                onChangeText={setUsername}
+                value={email}
+                onChangeText={setEmail}
                 autoCapitalize="none"
                 autoCorrect={false}
+                keyboardType="email-address"
+                textContentType="emailAddress"
               />
             </View>
 
@@ -116,10 +123,6 @@ const AdminLoginScreen: React.FC<AdminLoginScreenProps> = ({ navigation }) => {
             <Text style={styles.backButtonText}>← Înapoi</Text>
           </TouchableOpacity>
 
-          {/* Dev hint */}
-          <Text style={styles.hint}>
-            Hint: admin / safr2024
-          </Text>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>

@@ -116,6 +116,9 @@ const MapScreen = () => {
   const knownAlertIds = useRef<Set<string>>(new Set());
   // La primul snapshot Firebase, populăm fără popup (sunt alerte existente)
   const isFirstSnapshot = useRef(true);
+  // Flag: am încărcat deja shelter-ii pentru locația curentă?
+  // Previne re-fetch la fiecare update GPS minor (GPS poate notifica la fiecare secundă).
+  const sheltersLoadedForLocation = useRef(false);
 
   // Funcție comună de popup — folosită atât de Firebase cât și de BLE
   const showAlertPopup = useCallback((alert: DisasterAlert) => {
@@ -399,13 +402,20 @@ const MapScreen = () => {
   }, []);
 
   // --- 2.6. LOAD SHELTERS FROM OVERPASS API ---
+  // Shelter-ii se încarcă DOAR după ce avem locația GPS, pentru a construi
+  // bounding box-ul de SEARCH_RADIUS_KM în jurul user-ului.
   useEffect(() => {
+    if (!userLocation || sheltersLoadedForLocation.current) {
+      return;
+    }
+    sheltersLoadedForLocation.current = true;
+
     let isMounted = true;
 
     const loadShelters = async () => {
       try {
         setSheltersLoading(true);
-        const result = await getShelters();
+        const result = await getShelters(userLocation);
 
         if (!isMounted) return;
 
@@ -430,7 +440,7 @@ const MapScreen = () => {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [userLocation]);
 
   // Filtered shelters based on active filters
   const filteredShelters = useMemo(() => {
@@ -467,9 +477,16 @@ const MapScreen = () => {
 
   // Function to manually refresh shelters
   const handleRefreshShelters = useCallback(async () => {
+    if (!userLocation) {
+      Alert.alert(
+        'Locație indisponibilă',
+        'Pentru a afișa locațiile de urgență din zona ta, activează serviciile de localizare (GPS) și acordă permisiunea aplicației.',
+      );
+      return;
+    }
     setSheltersLoading(true);
     try {
-      const result = await refreshShelters();
+      const result = await refreshShelters(userLocation);
       setShelters(result.shelters);
       setSheltersSource(result.source);
       setSheltersError(result.error || null);
@@ -484,7 +501,7 @@ const MapScreen = () => {
     } finally {
       setSheltersLoading(false);
     }
-  }, []);
+  }, [userLocation]);
 
   // --- 3. STIL HARTA ---
   const mapStyle = useMemo(() => {
@@ -903,6 +920,18 @@ const MapScreen = () => {
               <Text style={styles.settingsButtonText}>Setări</Text>
             </TouchableOpacity>
           )}
+        </View>
+      )}
+
+      {/* --- GPS REQUIRED BANNER (pentru shelters) --- */}
+      {!userLocation && !locationError && (
+        <View style={styles.locationErrorBanner}>
+          <View style={styles.locationErrorContent}>
+            <Text style={styles.locationErrorIcon}>📍</Text>
+            <Text style={styles.locationErrorText}>
+              Activează GPS-ul pentru a vedea locațiile de urgență din zona ta.
+            </Text>
+          </View>
         </View>
       )}
 

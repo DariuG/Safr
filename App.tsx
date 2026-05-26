@@ -4,6 +4,7 @@
  * @format
  */
 
+import React, { useEffect } from 'react';
 import { StatusBar, StyleSheet, useColorScheme, Platform, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
@@ -20,6 +21,12 @@ import AdminLoginScreen from './src/screens/AdminLoginScreen';
 
 // Import context
 import { AuthProvider } from './src/context/AuthContext';
+
+// Notification setup
+import {
+  requestNotificationPermission,
+  initNotificationChannels,
+} from './src/services/notificationService';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -127,6 +134,14 @@ function TabNavigator() {
 
 function App() {
   const isDarkMode = useColorScheme() === 'dark';
+
+  useEffect(() => {
+    // Setup notificări la pornirea app-ului
+    (async () => {
+      await initNotificationChannels();
+      await requestNotificationPermission();
+    })();
+  }, []);
 
   return (
     <AuthProvider>

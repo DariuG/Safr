@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ActivityIndicator, PermissionsAndroid, Linking, TextInput, ScrollView, KeyboardAvoidingView, Keyboard } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ActivityIndicator, PermissionsAndroid, Linking, TextInput, ScrollView, KeyboardAvoidingView, Keyboard, AppState } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import RNFS from 'react-native-fs';
 import Geolocation from 'react-native-geolocation-service';
@@ -23,6 +23,11 @@ import {
   deleteAlert,
 } from '../services/alertService';
 import bleMeshService, { MeshStatus } from '../services/bleMeshService';
+import {
+  showAlertNotification,
+  registerNotificationHandlers,
+  getInitialAlertId,
+} from '../services/notificationService';
 
 // Helper function to create a circle polygon from center point and radius in km
 const createCirclePolygon = (centerLng: number, centerLat: number, radiusKm: number, points: number = 64): number[][] => {
@@ -120,8 +125,19 @@ const MapScreen = () => {
   // Previne re-fetch la fiecare update GPS minor (GPS poate notifica la fiecare secundă).
   const sheltersLoadedForLocation = useRef(false);
 
-  // Funcție comună de popup — folosită atât de Firebase cât și de BLE
+  // Funcție comună de notificare — folosită atât de Firebase cât și de BLE.
+  // Nivel 1 (foreground): popup Alert.alert nativ.
+  // Nivel 2 (background/inactive): notificare locală sistem prin @notifee.
   const showAlertPopup = useCallback((alert: DisasterAlert) => {
+    if (AppState.currentState !== 'active') {
+      // App în background → notificare sistem
+      showAlertNotification(alert).catch(err =>
+        console.warn('[MapScreen] Notif display failed:', err),
+      );
+      return;
+    }
+
+    // App în foreground → popup în-app
     const typeLabel = ALERT_TYPE_LABELS[alert.type]?.label || alert.type;
     const severityLabel = ALERT_SEVERITY_LABELS[alert.severity]?.label || alert.severity;
     Alert.alert(
@@ -141,6 +157,35 @@ const MapScreen = () => {
         },
       ],
     );
+  }, []);
+
+  // Centrează harta pe o alertă (folosit de tap pe notificare sistem)
+  const focusOnAlert = useCallback((alertId: string) => {
+    const alert = alerts.find(a => a.id === alertId);
+    if (alert) {
+      cameraRef.current?.setCamera({
+        centerCoordinate: [alert.lng, alert.lat],
+        zoomLevel: 13,
+        animationDuration: 500,
+      });
+    }
+  }, [alerts]);
+
+  // Înregistrează handler-i pentru tap pe notificare (foreground events)
+  useEffect(() => {
+    const unsubscribe = registerNotificationHandlers(focusOnAlert);
+    return unsubscribe;
+  }, [focusOnAlert]);
+
+  // La mount, verifică dacă app-ul a fost deschis dintr-o notificare (cold start)
+  useEffect(() => {
+    getInitialAlertId().then(initialId => {
+      if (initialId) {
+        // Așteaptă ca alertele să fie încărcate din Firebase
+        setTimeout(() => focusOnAlert(initialId), 1000);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // --- 1. SETUP HARTA OFFLINE ---

@@ -25,8 +25,8 @@ import {
 import bleMeshService, { MeshStatus } from '../services/bleMeshService';
 import {
   showAlertNotification,
-  registerNotificationHandlers,
-  getInitialAlertId,
+  subscribeAlertFocus,
+  AlertFocus,
 } from '../services/notificationService';
 
 // Helper function to create a circle polygon from center point and radius in km
@@ -159,34 +159,38 @@ const MapScreen = () => {
     );
   }, []);
 
-  // Centrează harta pe o alertă (folosit de tap pe notificare sistem)
-  const focusOnAlert = useCallback((alertId: string) => {
-    const alert = alerts.find(a => a.id === alertId);
-    if (alert) {
+  // Centrează harta pe o alertă (din tap pe notificare sistem).
+  // Folosește lat/lng din payload-ul notificării direct dacă există;
+  // altfel, caută alerta în array-ul live (funcționează doar pentru alerte reale Firestore).
+  const focusOnAlert = useCallback((focus: AlertFocus) => {
+    let lng = focus.lng;
+    let lat = focus.lat;
+    if (lng === undefined || lat === undefined) {
+      const alert = alerts.find(a => a.id === focus.alertId);
+      if (alert) {
+        lng = alert.lng;
+        lat = alert.lat;
+      }
+    }
+    if (lng !== undefined && lat !== undefined) {
       cameraRef.current?.setCamera({
-        centerCoordinate: [alert.lng, alert.lat],
+        centerCoordinate: [lng, lat],
         zoomLevel: 13,
         animationDuration: 500,
       });
     }
   }, [alerts]);
 
-  // Înregistrează handler-i pentru tap pe notificare (foreground events)
+  // Subscribe la evenimente alertFocus emise de notificationService.
+  // App-ul deja navighează la tab-ul Map; MapScreen primește acelasi
+  // eveniment și centrează camera cu un mic delay pentru a permite
+  // tranzitia de tab să termine.
   useEffect(() => {
-    const unsubscribe = registerNotificationHandlers(focusOnAlert);
+    const unsubscribe = subscribeAlertFocus((focus) => {
+      setTimeout(() => focusOnAlert(focus), 300);
+    });
     return unsubscribe;
   }, [focusOnAlert]);
-
-  // La mount, verifică dacă app-ul a fost deschis dintr-o notificare (cold start)
-  useEffect(() => {
-    getInitialAlertId().then(initialId => {
-      if (initialId) {
-        // Așteaptă ca alertele să fie încărcate din Firebase
-        setTimeout(() => focusOnAlert(initialId), 1000);
-      }
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // --- 1. SETUP HARTA OFFLINE ---
   useEffect(() => {

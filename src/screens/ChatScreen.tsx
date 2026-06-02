@@ -1,26 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  Alert, 
-  TouchableOpacity, 
-  ScrollView, 
+import {
+  View,
+  Text,
+  StyleSheet,
+  Alert,
+  TouchableOpacity,
+  ScrollView,
   TextInput,
   ActivityIndicator,
-  Platform 
+  Platform
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { downloadModel } from '../api/model';
-import RNFS from "react-native-fs";
 import { initLlama, releaseAllLlama } from 'llama.rn';
 import ProgressBar from '../components/ProgressBar';
-import { 
-  loadKnowledgeBase, 
-  retrieveRelevantContext, 
+import {
+  loadKnowledgeBase,
+  retrieveRelevantContext,
   formatContextForPrompt,
-  type KnowledgeEntry 
+  type KnowledgeEntry
 } from '../utils/rag';
+import modelManager, {
+  ModelManagerStatus,
+  LLM_FILE,
+} from '../services/modelManager';
 
 
 type Message = {
@@ -28,139 +30,144 @@ type Message = {
   content: string;
 };
 
-type Page = 'modelSelection' | 'conversation';
+// Prefix nomic-embed-text-v1.5 pentru queries (retrieval asimetric).
+// KB-ul a fost embedat cu "search_document: " — vezi
+// Creating_Data_For_RAG/build_knowledge_base_embed_from_json.py.
+// Cele două prefixe trebuie să rămână în sincron; dacă unul se schimbă
+// fără celălalt, spațiile de embedding nu se mai aliniază și similaritățile
+// devin haotice (problema cu "prim ajutor" diluând signal-ul AVC).
+const QUERY_PREFIX = 'search_query: ';
 
 const ChatScreen = () => {
 
+	// System prompt: instrucțiunile sunt în engleză (Llama 3.2 1B Instruct urmează
+	// instrucțiunile mai strict pe EN), dar modelul e instruit explicit să răspundă
+	// EXCLUSIV în limba română. KB-ul este în română, deci contextul injectat va
+	// fi tot RO și modelul poate copia/parafraza direct.
 	const INITIAL_CONVERSATION: Message[] = [
 		{
 			role: 'system',
 			content:
-			'You are a helpful emergency first-aid assistant. Answer the user\'s question using the information provided in the CONTEXT section below. Be direct and clear. Only use information from the CONTEXT.',
+				'You are a Romanian-speaking first-aid emergency assistant.\n\n' +
+				'CRITICAL RULES:\n' +
+				'- Respond ONLY in Romanian language. Never use English in your answers.\n' +
+				'- Use ONLY information from the CONTEXT section below. Do not invent medical advice.\n' +
+				'- If the CONTEXT does not contain the answer, reply in Romanian: "Nu am informații despre această situație. Sună la 112 pentru ajutor profesionist."\n' +
+				'- Be concise and clear. Use numbered steps for procedures.\n' +
+				'- Always remind to call 112 in serious emergencies.\n' +
+				'- Answer in 2-6 sentences maximum unless the user asks for detailed steps.',
 		},
 	];
 
 	const [conversation, setConversation] = useState<Message[]>(INITIAL_CONVERSATION);
-	// const [selectedModelFormat, setSelectedModelFormat] = useState<string>('');
-	// const [selectedGGUF, setSelectedGGUF] = useState<string | null>(null);
-	// const [availableGGUFs, setAvailableGGUFs] = useState<string[]>([]);
 	const [userInput, setUserInput] = useState<string>('');
-	const [progress, setProgress] = useState<number>(0);
 	const [context, setContext] = useState<any>(null);
 	const [embeddingContext, setEmbeddingContext] = useState<any>(null);
 	const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeEntry[]>([]);
-	const [isDownloading, setIsDownloading] = useState<boolean>(false);
-	const [downloadingModel, setDownloadingModel] = useState<string>('');
 	const [isGenerating, setIsGenerating] = useState<boolean>(false);
 	const [isInitializing, setIsInitializing] = useState<boolean>(false);
-	const [currentPage, setCurrentPage] = useState<Page>("modelSelection");
-	const [embeddingModelExists, setEmbeddingModelExists] = useState<boolean>(false);
+	// DEV: rezultat al testului de similaritate pure (fără LLM). De ascuns/scos înainte de release.
+	const [debugResult, setDebugResult] = useState<{
+		query: string;
+		topMatches: Array<{ tag: string; score: number; pattern: string; response: string }>;
+	} | null>(null);
+	const [isTesting, setIsTesting] = useState<boolean>(false);
+	const [modelState, setModelState] = useState<ModelManagerStatus>(modelManager.getStatus());
+	const [loadError, setLoadError] = useState<string | null>(null);
+	// Guard împotriva retry-ului automat infinit dacă initLlama eșuează.
+	// Resetat la true doar prin tap pe "Reîncearcă".
+	const loadAttemptedRef = React.useRef(false);
 	const scrollViewRef = React.useRef<ScrollView>(null);
 
-	const GGUF_MODEL = "medmekk/Llama-3.2-1B-Instruct.GGUF";
-	// const MODEL_FORMAT = "Llama-3.2-1B-Instruct-Q2_K.gguf"
-	const MODEL_FORMAT = "Llama-3.2-1B-Instruct-Q5_K_S.gguf"
-	
-	// Embedding model - use nomic-embed which is proven to work with llama.rn
-	// Note: This produces 768-dim embeddings, you'll need to regenerate your knowledge base
-	const EMBEDDING_MODEL = "nomic-ai/nomic-embed-text-v1.5-GGUF";
-	const EMBEDDING_MODEL_FORMAT = "nomic-embed-text-v1.5.Q4_K_M.gguf";
+	// File constants — sursă de adevăr e modelManager
+	const MODEL_FORMAT = LLM_FILE;
 
 
-	const handleDownloadAllModels = async () => {
-		try {
-			// Download LLM first
-			setIsDownloading(true);
-			setDownloadingModel(MODEL_FORMAT);
-			setProgress(0);
+  // Subscribe la modelManager — download-ul rulează central, ChatScreen doar reacționează
+  useEffect(() => {
+    const unsubscribe = modelManager.subscribe(setModelState);
+    return unsubscribe;
+  }, []);
 
-			const llmUrl = `https://huggingface.co/${GGUF_MODEL}/resolve/main/${MODEL_FORMAT}`;
-			await downloadModel(MODEL_FORMAT, llmUrl, progress => setProgress(progress));
-			console.log('✅ Chat model downloaded');
+  // DEV: rulează DOAR embedding + retrieval, fără LLM. Returnează scorurile top 5
+  // direct în UI, pentru a testa calitatea retrieval-ului rapid (~10ms inferență).
+  const handleTestScores = async () => {
+    if (!embeddingContext) {
+      Alert.alert('Embedding nu e gata', 'Modelul de embedding nu este încărcat încă.');
+      return;
+    }
+    if (!userInput.trim() || knowledgeBase.length === 0) {
+      return;
+    }
 
-			// Download embedding model
-			setDownloadingModel(EMBEDDING_MODEL_FORMAT);
-			setProgress(0);
+    const queryText = userInput.trim();
+    setIsTesting(true);
 
-			const embeddingUrl = `https://huggingface.co/${EMBEDDING_MODEL}/resolve/main/${EMBEDDING_MODEL_FORMAT}`;
-			await downloadModel(EMBEDDING_MODEL_FORMAT, embeddingUrl, progress => setProgress(progress));
-			console.log('✅ Embedding model downloaded');
+    try {
+      // Folosim embedQueryFresh care recreează contextul intern pentru fiecare
+      // call — necesar pentru a evita KV cache pollution între apeluri
+      // consecutive (vezi comentariile la embedQueryFresh).
+      const queryEmbedding = await embedQueryFresh(queryText);
 
-			setIsDownloading(false);
-			setDownloadingModel('');
+      // Calculează scorul pentru fiecare entry din KB
+      const allScores = knowledgeBase
+        .map(entry => ({
+          tag: entry.tag,
+          pattern: entry.pattern,
+          response: entry.response,
+          score: 0, // umplut mai jos
+        }));
 
-			Alert.alert('Success', 'Both models downloaded successfully!');
-			
-			// Load both models
-			await loadModel(MODEL_FORMAT);
-			setCurrentPage('conversation');
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : 'Download failed';
-			Alert.alert('Error', errorMessage);
-			setIsDownloading(false);
-			setDownloadingModel('');
-		}
-	};
+      for (let i = 0; i < knowledgeBase.length; i++) {
+        const entry = knowledgeBase[i];
+        let dot = 0, na = 0, nb = 0;
+        for (let j = 0; j < queryEmbedding.length; j++) {
+          dot += queryEmbedding[j] * entry.embedding[j];
+          na += queryEmbedding[j] * queryEmbedding[j];
+          nb += entry.embedding[j] * entry.embedding[j];
+        }
+        allScores[i].score = dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);
+      }
 
-	const handleDownloadLLM = async () => {
-		setIsDownloading(true);
-		setDownloadingModel(MODEL_FORMAT);
-		setProgress(0);
+      // Top 5 sortate descrescător
+      const top = allScores
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
 
-		try {
-			const downloadUrl = `https://huggingface.co/${GGUF_MODEL}/resolve/main/${MODEL_FORMAT}`;
-			const destPath = await downloadModel(MODEL_FORMAT, downloadUrl, progress =>
-				setProgress(progress),
-			);
+      setDebugResult({ query: queryText, topMatches: top });
 
-			Alert.alert('Success', 'Chat model downloaded successfully!');
-			
-			// Load the LLM after download
-			await loadModel(MODEL_FORMAT);
-			setCurrentPage('conversation');
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : 'Download failed';
-			Alert.alert('Error', errorMessage);
-		} finally {
-			setIsDownloading(false);
-			setDownloadingModel('');
-		}
-	};
-
-	const handleDownloadEmbedding = async () => {
-		setIsDownloading(true);
-		setDownloadingModel(EMBEDDING_MODEL_FORMAT);
-		setProgress(0);
-
-		try {
-			const downloadUrl = `https://huggingface.co/${EMBEDDING_MODEL}/resolve/main/${EMBEDDING_MODEL_FORMAT}`;
-			const destPath = await downloadModel(EMBEDDING_MODEL_FORMAT, downloadUrl, progress =>
-				setProgress(progress),
-			);
-
-			Alert.alert('Success', 'Embedding model downloaded successfully!');
-			
-			// Load the embedding model after download
-			await loadEmbeddingModel();
-			setEmbeddingModelExists(true);
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : 'Download failed';
-			Alert.alert('Error', errorMessage);
-		} finally {
-			setIsDownloading(false);
-			setDownloadingModel('');
-		}
-	};
+      // Log curat în Metro pentru copy-paste rapid
+      const lines = [
+        '',
+        '═══════════════════════════════════════════',
+        `🔍 Q: ${queryText}`,
+        '═══════════════════════════════════════════',
+        ...top.map((m, i) => {
+          const pct = (m.score * 100).toFixed(1).padStart(5, ' ');
+          const status = m.score >= 0.60 ? 'PASS' : 'fail';
+          return `  ${i + 1}. ${pct}% [${m.tag}]  ${status}`;
+        }),
+        '═══════════════════════════════════════════',
+        '',
+      ];
+      console.log(lines.join('\n'));
+    } catch (err) {
+      console.warn('[DEV] handleTestScores error:', err);
+      Alert.alert('Eroare', err instanceof Error ? err.message : 'Eroare necunoscută');
+    } finally {
+      setIsTesting(false);
+    }
+  };
 
   const handleSendMessage = async () => {
     // Check if context is loaded and user input is valid
     if (!context) {
-      Alert.alert('Model Not Loaded', 'Please load the model first.');
+      Alert.alert('Modelul nu este încărcat', 'Așteaptă finalizarea descărcării modelului AI.');
       return;
     }
 
     if (!userInput.trim()) {
-      Alert.alert('Input Error', 'Please enter a message.');
+      Alert.alert('Mesaj gol', 'Te rog scrie o întrebare.');
       return;
     }
 
@@ -174,98 +181,82 @@ const ChatScreen = () => {
       
       if (knowledgeBase.length > 0 && embeddingContext) {
         try {
-          // Generate embedding for user query (now matches pattern-only KB embeddings)
-          const { embedding: queryEmbedding } = await embeddingContext.embedding(userMessage);
-          
-          console.log(`📊 Query embedding dimensions: ${queryEmbedding.length}`);
-          console.log(`📊 First 10 values of query embedding:`, queryEmbedding.slice(0, 10));
-          console.log(`📊 Sum of query embedding:`, queryEmbedding.reduce((a: number, b: number) => a + b, 0));
-          console.log(`📊 Knowledge base embedding dimensions: ${knowledgeBase[0].embedding.length}`);
-          console.log(`📊 First 10 values of KB embedding:`, knowledgeBase[0].embedding.slice(0, 10));
-          
-          // Check if embeddings are all zeros or constant
-          const querySum = queryEmbedding.reduce((a: number, b: number) => a + b, 0);
-          const queryVariance = queryEmbedding.reduce((sum: number, val: number) => sum + val * val, 0);
-          
-          if (Math.abs(querySum) < 0.001 || Math.abs(queryVariance) < 0.001) {
-            console.error('❌ Query embedding appears to be all zeros or constant!');
-            console.error('The embedding model may not be working correctly.');
-            throw new Error('Invalid embedding generated');
-          }
-          
-          // Check if dimensions match
+          // Prefix `search_query: ` cerut de nomic-embed-v1.5. embedQueryFresh
+          // aplică prefix-ul automat și recreează contextul intern (vezi
+          // comentariile la embedQueryFresh).
+          const queryEmbedding = await embedQueryFresh(userMessage);
+
           if (queryEmbedding.length !== knowledgeBase[0].embedding.length) {
-            console.warn(`⚠️ Embedding dimension mismatch! Query: ${queryEmbedding.length}, KB: ${knowledgeBase[0].embedding.length}`);
-            console.warn('⚠️ Skipping RAG - model does not support same embedding dimension as knowledge base');
+            console.warn(
+              `Embedding dimension mismatch: query=${queryEmbedding.length} vs KB=${knowledgeBase[0].embedding.length} — skipping RAG`,
+            );
           } else {
-            // Retrieve relevant context from knowledge base with lower threshold
+            // Top-2 (nu 5) ca să evităm umplerea n_ctx cu 3000+ tokeni de
+            // context, ceea ce face procesarea prompt-ului inițial să dureze
+            // minute pe device fizic. KB-ul are intent-uri lungi (~2500 char
+            // fiecare) — 2 intent-uri ≈ 1200-1500 tokeni, lasă spațiu suficient
+            // pentru system prompt + mesaj user + n_predict 512.
             const relevantEntries = retrieveRelevantContext(
               queryEmbedding,
               knowledgeBase,
-              5,    // Top 5 results to capture multi-part answers
-              0.15  // 15% threshold to include related chunks
+              2,
+              0.15,
             );
-            
-            // Log all similarity scores for debugging
-            console.log('🔍 Top 10 similarity scores:');
-            const allScores = knowledgeBase.map(entry => ({
-              tag: entry.tag,
-              id: entry.id,
-              score: retrieveRelevantContext(queryEmbedding, [entry], 1, 0)[0]?.score || 0
-            })).sort((a, b) => b.score - a.score).slice(0, 10);
-            
-            allScores.forEach((item, idx) => {
-              console.log(`  ${idx + 1}. ${item.id} [${item.tag}]: ${(item.score * 100).toFixed(2)}%`);
-            });
-            
-            // Check if best match is below 60% - reject immediately
-            const bestScore = allScores[0]?.score || 0;
+
+            // Threshold de hard-reject 0.60 calibrat empiric pe 15 queries RO.
+            const bestScore = relevantEntries[0]?.score ?? 0;
+
+            // Log minimal — array-uri mari prin Metro bridge sunt foarte
+            // lente pe device fizic.
+            console.log(
+              `[RAG] best=${(bestScore * 100).toFixed(1)}% top=${
+                relevantEntries[0]?.entry.tag ?? '—'
+              }`,
+            );
+
             if (bestScore < 0.6) {
-              console.log(`⚠️ Best similarity score ${(bestScore * 100).toFixed(2)}% is below 75% threshold`);
-              console.log('🚫 Query appears unrelated to medical emergencies - returning standard rejection');
-              
-              // Set conversation with rejection message and skip LLM call
               setConversation(prev => [
                 ...prev,
-                {role: 'assistant', content: 'In case of any emergency, call 112!\n\nAccording to my knowledge base: I don\'t have information about this topic. Please call 112 (emergency services) immediately for professional help.'}
+                {
+                  role: 'assistant',
+                  content:
+                    'În caz de urgență, sună la 112!\n\nNu am informații despre acest subiect în baza mea de cunoștințe. Te rog sună la 112 (servicii de urgență) pentru ajutor profesionist.',
+                },
               ]);
               setIsGenerating(false);
-              return; // Exit early without calling LLM
+              return;
             }
-            
+
             if (relevantEntries.length > 0) {
               retrievedContext = formatContextForPrompt(relevantEntries);
-              console.log(`✅ Retrieved ${relevantEntries.length} relevant contexts`);
-              relevantEntries.forEach((item, idx) => {
-                console.log(`  ${idx + 1}. ${item.entry.id}: ${(item.score * 100).toFixed(1)}% similarity`);
-                console.log(`     Pattern: ${item.entry.pattern}`);
-                console.log(`     Response length: ${item.entry.response.length} chars`);
-                console.log(`     Response preview: ${item.entry.response.substring(0, 80)}...`);
-              });
-              console.log(`📝 Total context size: ${retrievedContext.length} characters`);
-              console.log('📝 Full context sent to model:');
-              console.log(retrievedContext.substring(0, 600) + '...');
-            } else {
-              console.log('⚠️ No relevant context found above threshold');
-              console.log('💡 Best match was:', allScores[0]);
+              console.log(
+                `[RAG] context=${retrievedContext.length}ch from ${relevantEntries.length} entries`,
+              );
             }
           }
         } catch (embeddingError) {
-          console.warn('⚠️ Failed to generate embedding, continuing without RAG:', embeddingError);
+          console.warn('[RAG] embedding failed, continuing without context:', embeddingError);
         }
       } else if (!embeddingContext) {
-        console.log('⚠️ Embedding model not loaded, skipping RAG');
+        console.log('[RAG] embedding model not loaded, skipping');
       }
 
-      // Build conversation with retrieved context injected into system message
+      // Build conversation with retrieved context injected into system message.
+      // Context-ul e în română (KB RO), instrucțiunea finală rămâne în EN pentru
+      // a fi urmărită strict de model (vezi system prompt INITIAL_CONVERSATION).
       let systemMessage = INITIAL_CONVERSATION[0].content;
-      
+
       if (retrievedContext) {
         // Medical query with relevant context found
-        systemMessage += "\n\nCONTEXT:\n" + retrievedContext + "\n\nUse the above context to answer the question.";
+        systemMessage +=
+          '\n\nCONTEXT (in Romanian):\n' +
+          retrievedContext +
+          '\n\nUse ONLY the information above to answer the user. Respond in Romanian.';
       } else {
-        // No relevant context found - refuse to answer
-        systemMessage += "\n\nCONTEXT:\nNo relevant information available.\n\nTell the user you don't have information about this topic.";
+        // No relevant context found - refuse to answer (model is instructed to reply in RO)
+        systemMessage +=
+          '\n\nCONTEXT:\nNo relevant information available.\n\n' +
+          'Reply in Romanian that you do not have information about this topic and suggest calling 112.';
       }
 
       // Keep only the last 4 message pairs (8 messages) to avoid context overflow
@@ -297,10 +288,15 @@ const ChatScreen = () => {
         '<｜end▁of▁sentence｜>',
       ];
       
-      // Send to model with retrieved context
+      // Send to model with retrieved context.
+      // n_predict: 512 = ~10-12 propoziții, suficient pentru first-aid;
+      // pe Llama 3.2 1B emulator (~2-5 tok/s) răspunde în 1-3 min în loc
+      // de 30+ min cu valoarea anterioară 10000. Stop tokens acoperă
+      // formatele Llama 3 (`<|eot_id|>`) și fallback-uri pentru alte
+      // modele care ar putea fi încărcate.
       const result = await context.completion({
         messages: newConversation,
-        n_predict: 10000,
+        n_predict: 512,
         stop: stopWords,
       });
 
@@ -316,8 +312,8 @@ const ChatScreen = () => {
     } catch (error) {
       // Handle errors during inference
       Alert.alert(
-        'Error During Inference',
-        error instanceof Error ? error.message : 'An unknown error occurred.',
+        'Eroare la generarea răspunsului',
+        error instanceof Error ? error.message : 'A apărut o eroare necunoscută.',
       );
     } finally {
       setIsGenerating(false);
@@ -328,14 +324,7 @@ const ChatScreen = () => {
   const loadModel = async (modelName: string) => {
     setIsInitializing(true);
     try {
-      const modelDir = `${RNFS.DocumentDirectoryPath}/models`;
-      const destPath = `${modelDir}/${modelName}`;
-
-      // Ensure the model file exists before attempting to load it
-      const fileExists = await RNFS.exists(destPath);
-      if (!fileExists) {
-        throw new Error('The model file does not exist.');
-      }
+      const destPath = modelManager.getLLMPath();
 
       if (context) {
         await releaseAllLlama();
@@ -344,63 +333,145 @@ const ChatScreen = () => {
         setConversation(INITIAL_CONVERSATION);
       }
 
-      // Load main LLM for chat
+      // Load main LLM for chat.
+      // n_threads: 4 — pe device-uri Android cu 6-8 cores, default-ul llama.rn
+      // poate folosi doar 1 thread, ceea ce dă viteză de inferență sub
+      // 5 tok/s. Cu 4 threads, ajungem la 15-25 tok/s pe procesoare moderne.
+      // Mai mult de 4 nu ajută (Hermes + bridge devin bottleneck).
+      // n_ctx: 2048 (redus de la 4096) — KB-ul nostru injectează cel mult 2
+      // entry-uri × ~750 tokeni + system + mesaj user = ~1700 tokeni. 2048
+      // lasă spațiu pentru răspuns dar reduce semnificativ memoria KV cache
+      // și timpul de procesare prompt.
       const llamaContext = await initLlama({
         model: destPath,
         use_mlock: true,
-        n_ctx: 4096,
+        n_ctx: 2048,
+        n_threads: 4,
         n_gpu_layers: 1,
       });
-      
+
       if (!llamaContext) {
-        throw new Error('Failed to initialize the model');
+        throw new Error('initLlama returned null');
       }
 
       setContext(llamaContext);
-      
+      setLoadError(null);
+
       // Load embedding model for RAG (in background)
       loadEmbeddingModel();
-      
+
       return true;
     } catch (error) {
-      Alert.alert('Error Loading Model', error instanceof Error ? error.message : 'An unknown error occurred.');
+      const msg = error instanceof Error ? error.message : 'Eroare necunoscută la inițializare';
+      console.error('[ChatScreen] loadModel failed:', msg);
+      setLoadError(msg);
       return false;
     } finally {
       setIsInitializing(false);
     }
   };
 
-  const loadEmbeddingModel = async () => {
-    try {
-      const modelDir = `${RNFS.DocumentDirectoryPath}/models`;
-      const embeddingPath = `${modelDir}/${EMBEDDING_MODEL_FORMAT}`;
+  // Tap pe "Reîncearcă" — initLlama a eșuat pe un fișier marcat ca 'ready',
+  // ceea ce înseamnă fie fișier corupt (de obicei după download întrerupt
+  // de backgrounding), fie incompatibilitate llama.rn. Doar re-apelarea
+  // initLlama pe același fișier ar produce aceeași eroare în buclă, deci
+  // forțăm un download proaspăt. useEffect-ul va re-declanșa loadModel
+  // automat când llmStatus revine la 'ready' după descărcare.
+  const retryLoadModel = () => {
+    setLoadError(null);
+    loadAttemptedRef.current = false;
+    modelManager.redownloadLLM().catch(err => {
+      console.warn('[ChatScreen] redownloadLLM failed:', err);
+    });
+  };
 
-      // Check if embedding model exists
-      const exists = await RNFS.exists(embeddingPath);
-      setEmbeddingModelExists(exists);
-      
-      if (!exists) {
-        console.log('⚠️ Embedding model not found. RAG will be disabled.');
-        console.log(`💡 To enable RAG, download: ${EMBEDDING_MODEL}`);
+  // Embedding context cu state pollution între apeluri: a doua chemare a
+  // embedding() pe același context returnează un vector "default" care dă
+  // ~46% cosine sim cu orice entry din KB, indiferent de query (KV cache
+  // nu se resetează corect între request-uri în llama.rn 0.8.0). Soluția:
+  // ținem contextul într-un ref + îl recreăm la fiecare call (release +
+  // initLlama proaspăt). Cost: ~500ms per query — acceptabil, garantează
+  // determinism. Nu folosim state pentru context pentru că setState e
+  // async și ar provoca race cu apeluri consecutive rapide.
+  const embeddingReadyRef = React.useRef<boolean>(false);
+
+  /**
+   * Inițializează un context proaspăt de embedding și returnează vectorul
+   * pentru textul dat. Apelantul NU trebuie să adauge prefix-ul nomic —
+   * QUERY_PREFIX este aplicat aici.
+   */
+  const embedQueryFresh = async (rawText: string): Promise<number[]> => {
+    if (!embeddingReadyRef.current) {
+      throw new Error('Embedding model nu este disponibil încă');
+    }
+
+    const embeddingPath = modelManager.getEmbeddingPath();
+
+    // Init context proaspăt pentru izolare totală de starea precedentă.
+    // pooling_type: 1 = MEAN (cerut de nomic-embed-text-v1.5).
+    // n_ctx: 2048 acoperă query-uri de până la ~1500 tokeni (mai mult decât
+    // necesar pentru first-aid queries, dar evită truncări neașteptate).
+    const embContext = await initLlama({
+      model: embeddingPath,
+      use_mlock: true,
+      n_ctx: 2048,
+      embedding: true,
+      pooling_type: 'mean',
+      n_gpu_layers: 1,
+    });
+
+    if (!embContext) {
+      throw new Error('initLlama a returnat null pentru embedding context');
+    }
+
+    try {
+      const { embedding } = await embContext.embedding(QUERY_PREFIX + rawText);
+      return embedding;
+    } finally {
+      // Release imediat — nu păstrăm contextul între apeluri.
+      // releaseAllLlama() ar fi ucis și contextul LLM-ului, deci folosim
+      // release() per-instanță.
+      await embContext.release().catch(err => {
+        console.warn('[ChatScreen] embed context release failed:', err);
+      });
+    }
+  };
+
+  const loadEmbeddingModel = async () => {
+    // Verificare validitate model fără păstrarea unui context persistent.
+    // Facem un init-and-release o singură dată ca smoke test pentru a marca
+    // embeddingReadyRef = true. Apoi fiecare query reinițializează prin
+    // embedQueryFresh().
+    try {
+      if (modelManager.getStatus().embeddingStatus !== 'ready') {
+        console.log('⚠️ Embedding model not ready yet. RAG will be disabled for now.');
         return;
       }
 
-      console.log('📦 Loading embedding model for RAG...');
-      
-      const embContext = await initLlama({
-        model: embeddingPath,
+      console.log('📦 Validating embedding model (smoke test)...');
+
+      const probe = await initLlama({
+        model: modelManager.getEmbeddingPath(),
         use_mlock: true,
-        n_ctx: 512,
+        n_ctx: 2048,
         embedding: true,
+        pooling_type: 'mean',
         n_gpu_layers: 1,
       });
 
-      if (embContext) {
-        setEmbeddingContext(embContext);
-        console.log('✅ Embedding model loaded successfully');
+      if (!probe) {
+        throw new Error('initLlama smoke test returned null');
       }
+
+      await probe.release().catch(() => {});
+      embeddingReadyRef.current = true;
+      // Setăm un sentinel non-null pentru ca UI-ul să detecteze "embedding gata".
+      // Valoarea reală a contextului NU mai este folosită — embedQueryFresh
+      // creează unul proaspăt per call.
+      setEmbeddingContext({ _ready: true });
+      console.log('✅ Embedding model validated (per-call init mode)');
     } catch (error) {
-      console.warn('⚠️ Failed to load embedding model:', error);
+      console.warn('⚠️ Failed to validate embedding model:', error);
       console.log('RAG will be disabled');
     }
   };
@@ -418,8 +489,8 @@ const ChatScreen = () => {
       } catch (error) {
         console.error('Failed to load knowledge base:', error);
         Alert.alert(
-          'Knowledge Base Error',
-          'Failed to load emergency knowledge base. RAG features will be disabled.',
+          'Eroare bază de cunoștințe',
+          'Nu s-a putut încărca baza de cunoștințe medicale. Funcțiile RAG vor fi dezactivate.',
         );
       }
     };
@@ -431,39 +502,22 @@ const ChatScreen = () => {
     };
   }, []);
 
-  // On mount, check whether the model file already exists on device.
-  // If it does, switch to the conversation view and attempt to load it.
+  // Auto-load Llama context când modelManager raportează LLM ready.
+  // `loadAttemptedRef` previne retry-ul infinit dacă initLlama eșuează —
+  // pe error rămâne true și useEffect-ul nu mai apelează loadModel,
+  // doar tap pe "Reîncearcă" îl resetează.
   useEffect(() => {
-    let mounted = true;
-
-    const checkAndLoadModel = async () => {
-      try {
-        const modelDir = `${RNFS.DocumentDirectoryPath}/models`;
-        const destPath = `${modelDir}/${MODEL_FORMAT}`;
-        const embeddingPath = `${modelDir}/${EMBEDDING_MODEL_FORMAT}`;
-        const exists = await RNFS.exists(destPath);
-        const embExists = await RNFS.exists(embeddingPath);
-        setEmbeddingModelExists(embExists);
-        if (exists && mounted) {
-          // Show conversation screen and try to initialize the model in background
-          setCurrentPage('conversation');
-          const ok = await loadModel(MODEL_FORMAT);
-          if (!ok && mounted) {
-            // If initialization failed, go back to selection so user can retry
-            setCurrentPage('modelSelection');
-          }
-        }
-      } catch (err) {
-        console.log('Error checking/loading model on mount', err);
-      }
-    };
-
-    checkAndLoadModel();
-
-    return () => {
-      mounted = false;
-    };
-  }, []);
+    if (
+      modelState.llmStatus === 'ready' &&
+      !context &&
+      !isInitializing &&
+      !loadAttemptedRef.current
+    ) {
+      loadAttemptedRef.current = true;
+      loadModel(MODEL_FORMAT);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelState.llmStatus, context, isInitializing, loadError]);
 
   	return (
     <SafeAreaView style={styles.container}>
@@ -471,77 +525,139 @@ const ChatScreen = () => {
         ref={scrollViewRef}
         contentContainerStyle={styles.scrollView}
         onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}>
-        <Text style={styles.title}>Safr assistant</Text>
-        {/* Model Selection Section */}
-        {currentPage === 'modelSelection' && !isDownloading && (
+        <Text style={styles.title}>Asistent Safr</Text>
+        {/* Stare LLM: descărcare în curs sau eroare → progress / retry card */}
+        {modelState.llmStatus === 'downloading' && (
           <View style={styles.card}>
-            <Text style={styles.subtitle}>Download Models</Text>
+            <Text style={styles.subtitle}>Se descarcă modelul AI</Text>
             <Text style={styles.cardText}>
-              This will download both the chat model and embedding model for RAG functionality.
+              {modelState.isCellular
+                ? 'Descărcare pe date mobile în curs. Va dura câteva minute.'
+                : 'Modelul AI medical offline (~800 MB) se descarcă. Va fi disponibil în câteva minute.'}
             </Text>
-            <Text style={[styles.cardText, { marginTop: 8, fontSize: 12, fontStyle: 'italic' }]}>
-              • Chat Model: {MODEL_FORMAT}
+            <View style={{ marginTop: 12 }}>
+              <ProgressBar progress={modelState.llmProgress} />
+            </View>
+            <Text style={[styles.cardText, { marginTop: 8, fontSize: 12, textAlign: 'center' }]}>
+              {modelState.llmProgress}%
             </Text>
-            <Text style={[styles.cardText, { fontSize: 12, fontStyle: 'italic' }]}>
-              • Embedding Model: {EMBEDDING_MODEL_FORMAT}
+          </View>
+        )}
+
+        {modelState.llmStatus === 'copying' && (
+          <View style={styles.card}>
+            <Text style={styles.subtitle}>Inițializare AI</Text>
+            <ActivityIndicator size="large" color="#2563EB" style={{ marginVertical: 12 }} />
+          </View>
+        )}
+
+        {(modelState.llmStatus === 'missing' || modelState.llmStatus === 'error') && (
+          <View style={styles.card}>
+            <Text style={styles.subtitle}>AI offline indisponibil</Text>
+            <Text style={styles.cardText}>
+              {modelState.llmError || 'Modelul AI nu a fost descărcat încă.'}
             </Text>
             <TouchableOpacity
               style={styles.button}
-              onPress={handleDownloadAllModels}>
-              <Text style={styles.buttonText}>Download Both Models</Text>
+              onPress={() => modelManager.startLLMDownload()}>
+              <Text style={styles.buttonText}>Descarcă acum</Text>
             </TouchableOpacity>
           </View>
         )}
-            
-        {currentPage === 'conversation' && !isDownloading && (
+
+        {/* Stare LLM ready, încărcare context în curs */}
+        {modelState.llmStatus === 'ready' && !context && !loadError && (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#2563EB" />
+            <Text style={styles.loadingText}>Inițializare model AI...</Text>
+          </View>
+        )}
+
+        {/* Stare LLM ready, dar initLlama a eșuat */}
+        {modelState.llmStatus === 'ready' && !context && loadError && (
+          <View style={styles.card}>
+            <Text style={styles.subtitle}>Eroare la încărcarea modelului</Text>
+            <Text style={styles.cardText}>{loadError}</Text>
+            <Text style={[styles.cardText, { marginTop: 8, fontSize: 12, fontStyle: 'italic' }]}>
+              Cel mai probabil fișierul modelului este corupt (descărcare întreruptă).
+              Reîncearcă pentru a-l șterge și descărca din nou (~800 MB).
+            </Text>
+            <TouchableOpacity style={styles.button} onPress={retryLoadModel}>
+              <Text style={styles.buttonText}>Șterge și descarcă din nou</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Chat normal */}
+        {context && (
           <View style={styles.chatContainer}>
-            {isInitializing ? (
-              <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" color="#2563EB" />
-                <Text style={styles.loadingText}>Initializing model...</Text>
-              </View>
-            ) : (
-              <>
-                <Text style={styles.greetingText}>
-                  Your personal emergency assistant is ready to chat. How can I help you today?
-                </Text>
-                {conversation.slice(1).map((msg, index) => (
-                  <View key={index} style={styles.messageWrapper}>
-                    <View
-                      style={[
-                        styles.messageBubble,
-                        msg.role === 'user'
-                          ? styles.userBubble
-                          : styles.llamaBubble,
-                      ]}>
-                      <Text
-                        style={[
-                          styles.messageText,
-                          msg.role === 'user' && styles.userMessageText,
-                        ]}>
-                        {msg.content}
+            <Text style={styles.greetingText}>
+              Asistentul tău AI pentru urgențe este gata. Cu ce te pot ajuta?
+            </Text>
+
+            {/* DEV: rezultatul ultimului test de scor (fără LLM) */}
+            {debugResult && (
+              <View style={styles.debugCard}>
+                <View style={styles.debugHeader}>
+                  <Text style={styles.debugTitle}>🔍 Test scor (fără LLM)</Text>
+                  <TouchableOpacity onPress={() => setDebugResult(null)}>
+                    <Text style={styles.debugClose}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.debugQuery} selectable>Q: {debugResult.query}</Text>
+                {debugResult.topMatches.map((m, i) => {
+                  const pct = (m.score * 100).toFixed(1);
+                  const willPass = m.score >= 0.60;
+                  return (
+                    <View key={i} style={styles.debugMatch}>
+                      <Text style={styles.debugMatchHeader} selectable>
+                        {i + 1}. <Text style={{ color: willPass ? '#16A34A' : '#DC2626', fontWeight: '700' }}>{pct}%</Text> [{m.tag}]
                       </Text>
+                      <Text style={styles.debugPattern} selectable numberOfLines={2}>
+                        Pattern: {m.pattern}
+                      </Text>
+                      {i === 0 && (
+                        <Text style={styles.debugResponse} selectable numberOfLines={4}>
+                          {m.response}
+                        </Text>
+                      )}
                     </View>
-                  </View>
-                ))}
-                {isGenerating && (
-                  <View style={[styles.messageBubble, styles.llamaBubble]}>
-                    <ActivityIndicator size="small" color="#2563EB" />
-                  </View>
-                )}
-              </>
+                  );
+                })}
+                <Text style={styles.debugHint}>
+                  Verde = peste prag 60% (intră în context LLM). Roșu = sub prag → mesaj "sună la 112". (Loguri detaliate în Metro console.)
+                </Text>
+              </View>
+            )}
+
+            {conversation.slice(1).map((msg, index) => (
+              <View key={index} style={styles.messageWrapper}>
+                <View
+                  style={[
+                    styles.messageBubble,
+                    msg.role === 'user'
+                      ? styles.userBubble
+                      : styles.llamaBubble,
+                  ]}>
+                  <Text
+                    style={[
+                      styles.messageText,
+                      msg.role === 'user' && styles.userMessageText,
+                    ]}>
+                    {msg.content}
+                  </Text>
+                </View>
+              </View>
+            ))}
+            {isGenerating && (
+              <View style={[styles.messageBubble, styles.llamaBubble]}>
+                <ActivityIndicator size="small" color="#2563EB" />
+              </View>
             )}
           </View>
         )}
-        {isDownloading && (
-          <View style={styles.card}>
-            <Text style={styles.subtitle}>Downloading</Text>
-            <Text style={styles.subtitle2}>{downloadingModel}</Text>
-            <ProgressBar progress={progress} />
-          </View>
-        )}
       </ScrollView>
-      {currentPage === 'conversation' && (
+      {context && (
         <View style={styles.inputContainer}>
           <View style={styles.buttonRow}>
             <TextInput
@@ -557,13 +673,24 @@ const ChatScreen = () => {
             />
             <TouchableOpacity
               style={[
+                styles.testButton,
+                (isTesting || isGenerating || !userInput.trim()) && { backgroundColor: '#94A3B8' }
+              ]}
+              onPress={handleTestScores}
+              disabled={isTesting || isGenerating || !userInput.trim()}>
+              <Text style={styles.testButtonText}>
+                {isTesting ? '...' : '🔍'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
                 styles.sendButton,
                 isGenerating && { backgroundColor: '#94A3B8' }
               ]}
               onPress={handleSendMessage}
               disabled={isGenerating || !userInput.trim()}>
               <Text style={styles.buttonText}>
-                {isGenerating ? 'Sending...' : 'Send'}
+                {isGenerating ? 'Trimit...' : 'Send'}
               </Text>
             </TouchableOpacity>
           </View>
@@ -740,6 +867,86 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#E2E8F0',
     paddingBottom: Platform.OS === 'ios' ? 110 : 100, // Space for tab bar (90px) + extra padding
+  },
+
+  // ── DEV: stiluri pentru testul de scor ──
+  testButton: {
+    backgroundColor: '#7C3AED',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    marginRight: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 48,
+  },
+  testButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  debugCard: {
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: '#FCD34D',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+  },
+  debugHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  debugTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#92400E',
+    letterSpacing: 0.5,
+  },
+  debugClose: {
+    fontSize: 16,
+    color: '#92400E',
+    paddingHorizontal: 6,
+  },
+  debugQuery: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#0F172A',
+    marginBottom: 8,
+    fontStyle: 'italic',
+  },
+  debugMatch: {
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    padding: 8,
+    borderRadius: 6,
+    marginBottom: 4,
+  },
+  debugMatchHeader: {
+    fontSize: 12,
+    color: '#0F172A',
+    marginBottom: 2,
+  },
+  debugPattern: {
+    fontSize: 11,
+    color: '#475569',
+  },
+  debugResponse: {
+    fontSize: 11,
+    color: '#0F172A',
+    marginTop: 4,
+    fontStyle: 'italic',
+    borderLeftWidth: 2,
+    borderLeftColor: '#94A3B8',
+    paddingLeft: 6,
+  },
+  debugHint: {
+    fontSize: 10,
+    color: '#92400E',
+    marginTop: 4,
+    fontStyle: 'italic',
   },
 });
 

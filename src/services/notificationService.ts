@@ -108,45 +108,97 @@ export const cancelAlertNotification = async (alertId: string): Promise<void> =>
   await notifee.cancelNotification(alertId);
 };
 
+// ── Deep-link orchestration ──
+//
+// Toate sursele de "tap pe notificare" (foreground / background / cold-start)
+// converg într-un singur eveniment `alertFocus`. Listener-ii (App + MapScreen)
+// se abonează independent: App-ul navighează la tab-ul Map, MapScreen
+// centrează camera. Dacă tap-ul vine înainte de mount-ul listener-ilor
+// (cold start), focus-ul e ținut într-o variabilă pending și livrat la
+// primul subscribe.
+
+export type AlertFocus = {
+  alertId: string;
+  lat?: number;
+  lng?: number;
+};
+
+let pendingFocus: AlertFocus | null = null;
+const focusListeners = new Set<(focus: AlertFocus) => void>();
+
+export const extractAlertFocus = (data: any): AlertFocus | null => {
+  if (!data?.alertId) return null;
+  return {
+    alertId: String(data.alertId),
+    lat: data.lat ? parseFloat(String(data.lat)) : undefined,
+    lng: data.lng ? parseFloat(String(data.lng)) : undefined,
+  };
+};
+
+const emitAlertFocus = (focus: AlertFocus) => {
+  if (focusListeners.size > 0) {
+    focusListeners.forEach(l => l(focus));
+  } else {
+    // Niciun listener încă (cold start) — stochează pentru primul subscribe
+    pendingFocus = focus;
+  }
+};
+
 /**
- * Înregistrează handler-i pentru tap pe notificare.
- * Returnează un unsubscribe pentru cleanup.
- *
- * onAlertTap: apelat cu alertId când userul atinge o notificare.
+ * Abonare la evenimente de tap pe notificare. Apelat de App.tsx (pentru
+ * navigare) și de MapScreen (pentru centrarea camerei). La subscribe,
+ * orice focus pending e livrat imediat.
  */
-export const registerNotificationHandlers = (
-  onAlertTap: (alertId: string) => void,
+export const subscribeAlertFocus = (
+  handler: (focus: AlertFocus) => void,
 ): (() => void) => {
-  // Foreground: când userul atinge o notificare cu app-ul deschis
-  const unsubscribeForeground = notifee.onForegroundEvent(({ type, detail }) => {
-    if (type === EventType.PRESS && detail.notification?.data?.alertId) {
-      onAlertTap(String(detail.notification.data.alertId));
+  focusListeners.add(handler);
+  if (pendingFocus) {
+    const f = pendingFocus;
+    pendingFocus = null;
+    handler(f);
+  }
+  return () => {
+    focusListeners.delete(handler);
+  };
+};
+
+/**
+ * Înregistrează handler-ul pentru tap-uri în foreground.
+ * Apelat la nivel global de App.tsx, nu de ecrane individuale.
+ */
+export const registerForegroundTapHandler = (): (() => void) => {
+  return notifee.onForegroundEvent(({ type, detail }) => {
+    if (type === EventType.PRESS) {
+      const focus = extractAlertFocus(detail.notification?.data);
+      if (focus) emitAlertFocus(focus);
     }
   });
-
-  return unsubscribeForeground;
 };
 
 /**
- * Background handler — trebuie înregistrat la module-level în index.js,
- * NU în React component, pentru a funcționa când app-ul e killed.
- * Vezi index.js pentru apel.
+ * Verifică dacă app-ul a fost deschis dintr-o notificare (cold start).
+ * Apelat de App.tsx după mount.
+ */
+export const checkInitialNotification = async (): Promise<void> => {
+  const initial = await notifee.getInitialNotification();
+  if (initial?.notification?.data) {
+    const focus = extractAlertFocus(initial.notification.data);
+    if (focus) emitAlertFocus(focus);
+  }
+};
+
+/**
+ * Background handler — înregistrat la module-level în index.js.
+ * Setează focus-ul pending; livrarea se face când app-ul revine în foreground
+ * și listener-ii se abonează / sunt deja abonați.
  */
 export const backgroundEventHandler = async ({ type, detail }: any): Promise<void> => {
-  if (type === EventType.PRESS && detail.notification?.data?.alertId) {
-    // App-ul va porni și `getInitialNotification` va fi citită la mount
-    console.log('[Notif] Background press for alert:', detail.notification.data.alertId);
+  if (type === EventType.PRESS) {
+    const focus = extractAlertFocus(detail.notification?.data);
+    if (focus) {
+      console.log('[Notif] Background press for alert:', focus.alertId);
+      emitAlertFocus(focus);
+    }
   }
-};
-
-/**
- * Returnează alertId-ul notificării care a deschis app-ul (dacă există).
- * Apelat la mount-ul MapScreen pentru a face deep-link.
- */
-export const getInitialAlertId = async (): Promise<string | null> => {
-  const initialNotification = await notifee.getInitialNotification();
-  if (initialNotification?.notification?.data?.alertId) {
-    return String(initialNotification.notification.data.alertId);
-  }
-  return null;
 };

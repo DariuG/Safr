@@ -70,6 +70,11 @@ yarn-error.log
 # testing
 /coverage
 
+# AI model binaries — see SETUP_STEPS.md for download instructions
+*.gguf
+android/app/src/main/assets/models/
+ios/Safr/*.gguf
+
 # Yarn
 .yarn/*
 !.yarn/patches

@@ -1,10 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
 import bleMeshService, { MeshStatus } from '../services/bleMeshService';
-import { subscribeToAlerts, DisasterAlert } from '../services/alertService';
+import {
+  subscribeToAlerts,
+  DisasterAlert,
+  AlertSeverity,
+  ALERT_SEVERITY_LABELS,
+} from '../services/alertService';
+import modelManager, { ModelManagerStatus } from '../services/modelManager';
+import { showAlertNotification } from '../services/notificationService';
 
 const SAFETY_TIPS = [
   'Identifica iesirile de urgenta din cladirea in care te afli.',
@@ -19,6 +26,7 @@ const HomeScreen = () => {
   const { isAdmin, logout } = useAuth();
   const [meshStatus, setMeshStatus] = useState<MeshStatus | null>(null);
   const [alertCount, setAlertCount] = useState(0);
+  const [modelState, setModelState] = useState<ModelManagerStatus>(modelManager.getStatus());
   const [tipIndex] = useState(() => Math.floor(Math.random() * SAFETY_TIPS.length));
 
   useEffect(() => {
@@ -34,6 +42,77 @@ const HomeScreen = () => {
     );
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    const unsubscribe = modelManager.subscribe(setModelState);
+    return unsubscribe;
+  }, []);
+
+  // ── DEV: Test notificare locală cu countdown ──
+  // Permite testarea Nivelului 2 (notificare sistem) fără cerere Firestore.
+  // Userul are 5 secunde să apese Home → notificarea apare ca sistem când app e în background.
+  const triggerTestNotification = (severity: AlertSeverity) => {
+    const sevLabel = ALERT_SEVERITY_LABELS[severity]?.label || severity;
+    Alert.alert(
+      'Test notificare',
+      `Severitate: ${sevLabel}.\n\nApasă "Start" apoi treci app-ul în background (Home button) în 5 secunde. Notificarea va apărea ca sistem.`,
+      [
+        { text: 'Anulează', style: 'cancel' },
+        {
+          text: 'Start',
+          onPress: () => {
+            setTimeout(() => {
+              const fakeAlert: DisasterAlert = {
+                id: `test-${Date.now()}`,
+                type: 'earthquake',
+                severity,
+                lat: 45.7489,
+                lng: 21.2087,
+                radius: 5,
+                message: `Test ${sevLabel} — această notificare este generată local pentru testare.`,
+                timestamp: Date.now(),
+                createdAt: Date.now(),
+                expiresAt: Date.now() + 3600000,
+                isActive: true,
+                createdBy: 'dev-test',
+              };
+              showAlertNotification(fakeAlert).catch(err =>
+                console.warn('[DEV] Test notification failed:', err),
+              );
+            }, 5000);
+          },
+        },
+      ],
+    );
+  };
+
+  // Derive AI card visual state
+  const llm = modelState.llmStatus;
+  const showAICard = llm !== 'ready' && llm !== 'unknown';
+  let aiCardTitle = '';
+  let aiCardSubtitle = '';
+  let aiCardAction: (() => void) | null = null;
+  let aiCardActionLabel = '';
+  let aiCardAccent = '#0EA5E9';
+  if (llm === 'downloading') {
+    aiCardTitle = `AI offline: descărcare ${modelState.llmProgress}%`;
+    aiCardSubtitle = modelState.isCellular
+      ? 'Se descarcă pe date mobile. Conectează-te la WiFi pentru a economisi date.'
+      : 'Modelul AI medical (~800 MB) se descarcă în fundal.';
+    aiCardAccent = '#0EA5E9';
+  } else if (llm === 'missing') {
+    aiCardTitle = 'AI offline: indisponibil';
+    aiCardSubtitle = modelState.llmError || 'Modelul AI nu este descărcat.';
+    aiCardActionLabel = 'Descarcă acum';
+    aiCardAction = () => modelManager.startLLMDownload();
+    aiCardAccent = '#F59E0B';
+  } else if (llm === 'error') {
+    aiCardTitle = 'AI offline: eroare la descărcare';
+    aiCardSubtitle = modelState.llmError || 'Reîncearcă mai târziu.';
+    aiCardActionLabel = 'Reîncearcă';
+    aiCardAction = () => modelManager.startLLMDownload();
+    aiCardAccent = '#EF4444';
+  }
 
   // Mesh status logic (same as MapScreen badge)
   const btOff = !meshStatus || meshStatus.bluetoothState !== 'on';
@@ -101,6 +180,35 @@ const HomeScreen = () => {
         contentContainerStyle={s.lightContent}
         showsVerticalScrollIndicator={false}
       >
+        {/* AI model status card — apare doar dacă LLM nu e gata */}
+        {showAICard && (
+          <View style={[s.aiCard, { borderLeftColor: aiCardAccent }]}>
+            <View style={s.aiCardBody}>
+              <Text style={s.aiCardTitle}>{aiCardTitle}</Text>
+              <Text style={s.aiCardSubtitle}>{aiCardSubtitle}</Text>
+              {llm === 'downloading' && (
+                <View style={s.aiProgressTrack}>
+                  <View
+                    style={[
+                      s.aiProgressFill,
+                      { width: `${modelState.llmProgress}%`, backgroundColor: aiCardAccent },
+                    ]}
+                  />
+                </View>
+              )}
+              {aiCardAction && (
+                <TouchableOpacity
+                  style={[s.aiCardButton, { backgroundColor: aiCardAccent }]}
+                  onPress={aiCardAction}
+                  activeOpacity={0.7}
+                >
+                  <Text style={s.aiCardButtonText}>{aiCardActionLabel}</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        )}
+
         {/* Quick actions */}
         <Text style={s.sectionTitle}>Acces rapid</Text>
         <View style={s.grid}>
@@ -157,6 +265,37 @@ const HomeScreen = () => {
             <Text style={s.adminLoginText}>Admin Login</Text>
           </TouchableOpacity>
         )}
+
+        {/* DEV: Test notificare — de scos înainte de release */}
+        <View style={s.devSection}>
+          <Text style={s.devLabel}>DEV — Test notificare</Text>
+          <View style={s.devButtonRow}>
+            <TouchableOpacity
+              style={[s.devButton, { backgroundColor: '#65A30D' }]}
+              onPress={() => triggerTestNotification('low')}
+            >
+              <Text style={s.devButtonText}>Low</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.devButton, { backgroundColor: '#F59E0B' }]}
+              onPress={() => triggerTestNotification('medium')}
+            >
+              <Text style={s.devButtonText}>Med</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.devButton, { backgroundColor: '#EA580C' }]}
+              onPress={() => triggerTestNotification('high')}
+            >
+              <Text style={s.devButtonText}>High</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.devButton, { backgroundColor: '#DC2626' }]}
+              onPress={() => triggerTestNotification('critical')}
+            >
+              <Text style={s.devButtonText}>Crit</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
 
         <View style={{ height: 30 }} />
       </ScrollView>
@@ -363,6 +502,92 @@ const s = StyleSheet.create({
     color: '#64748B',
     fontSize: 13,
     fontWeight: '600',
+  },
+
+  // AI model status card
+  aiCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderLeftWidth: 4,
+    marginBottom: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  aiCardBody: {
+    padding: 16,
+  },
+  aiCardTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0F172A',
+    marginBottom: 4,
+  },
+  aiCardSubtitle: {
+    fontSize: 12,
+    color: '#64748B',
+    lineHeight: 17,
+    marginBottom: 12,
+  },
+  aiProgressTrack: {
+    height: 6,
+    backgroundColor: '#E2E8F0',
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginBottom: 4,
+  },
+  aiProgressFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  aiCardButton: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginTop: 4,
+  },
+  aiCardButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
+  // DEV test section
+  devSection: {
+    marginTop: 20,
+    padding: 12,
+    backgroundColor: '#FEF3C7',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: '#FCD34D',
+  },
+  devLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#92400E',
+    letterSpacing: 1,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  devButtonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 6,
+  },
+  devButton: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 6,
+  },
+  devButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+    textAlign: 'center',
   },
 });
 

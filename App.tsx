@@ -26,7 +26,16 @@ import { AuthProvider } from './src/context/AuthContext';
 import {
   requestNotificationPermission,
   initNotificationChannels,
+  registerForegroundTapHandler,
+  checkInitialNotification,
+  subscribeAlertFocus,
 } from './src/services/notificationService';
+
+// Navigation ref pentru deep-link din afara componentelor
+import { navigationRef, navigateToMap } from './src/utils/navigationRef';
+
+// AI models manager (background download + bundle copy)
+import modelManager from './src/services/modelManager';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -136,17 +145,41 @@ function App() {
   const isDarkMode = useColorScheme() === 'dark';
 
   useEffect(() => {
-    // Setup notificări la pornirea app-ului
+    // Setup notificări + modele AI la pornirea app-ului
     (async () => {
       await initNotificationChannels();
       await requestNotificationPermission();
+
+      // Pornește verificarea/descărcarea modelelor în background.
+      // Embedding se copiază din bundle (rapid), LLM se descarcă async (~800 MB).
+      modelManager.init().catch(err => {
+        console.error('[App] modelManager.init failed:', err);
+      });
     })();
+
+    // ── Deep-link la nivel global pentru tap-uri pe notificări ──
+    // App.tsx ascultă alertFocus și navighează la tab-ul Map.
+    // MapScreen ascultă tot alertFocus, dar pentru centrarea camerei.
+    const unsubFocus = subscribeAlertFocus(() => {
+      navigateToMap();
+    });
+
+    // Înregistrează handler-ul de tap în foreground
+    const unsubForeground = registerForegroundTapHandler();
+
+    // Verifică cold-start (app deschisă printr-o notificare din terminated state)
+    checkInitialNotification();
+
+    return () => {
+      unsubFocus();
+      unsubForeground();
+    };
   }, []);
 
   return (
     <AuthProvider>
       <SafeAreaProvider>
-        <NavigationContainer>
+        <NavigationContainer ref={navigationRef}>
           <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
           <Stack.Navigator screenOptions={{ headerShown: false }}>
             <Stack.Screen name="MainTabs" component={TabNavigator} />

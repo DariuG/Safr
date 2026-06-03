@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
+import Geolocation from 'react-native-geolocation-service';
 
 // --- TYPES ---
 export interface Shelter {
@@ -436,6 +437,65 @@ export const refreshShelters = async (
       return {shelters: cached.shelters, source: 'cache', error: `Refresh failed: ${errorMessage}`};
     }
     return {shelters: FALLBACK_SHELTERS, source: 'fallback', error: `Refresh failed: ${errorMessage}`};
+  }
+};
+
+/**
+ * Prefetch shelters la pornirea app-ului (apelat din App.tsx), ca să populeze
+ * cache-ul ÎNAINTE ca userul să intre pe MapScreen → markeri instant.
+ *
+ * Comportament:
+ *  - Skip dacă cache-ul e încă proaspăt (< CACHE_MAX_AGE) — evită un fetch
+ *    API inutil la fiecare pornire.
+ *  - Citește GPS one-shot; dacă permisiunea lipsește sau GPS e indisponibil,
+ *    skip silent (MapScreen va gestiona normal la mount, cu banner GPS).
+ *  - Fail-silent pe orice eroare — niciun popup la startup.
+ */
+export const prefetchShelters = async (): Promise<void> => {
+  try {
+    const ts = await AsyncStorage.getItem(STORAGE_TIMESTAMP_KEY);
+    if (ts && Date.now() - parseInt(ts, 10) < CACHE_MAX_AGE) {
+      console.log('[ShelterService] Prefetch skipped — cache still fresh');
+      return;
+    }
+
+    const location = await new Promise<{latitude: number; longitude: number} | null>(resolve => {
+      Geolocation.getCurrentPosition(
+        pos => resolve({latitude: pos.coords.latitude, longitude: pos.coords.longitude}),
+        () => resolve(null), // eroare / permisiune lipsă → skip silent
+        {enableHighAccuracy: false, timeout: 10000, maximumAge: 60000},
+      );
+    });
+
+    if (!location) {
+      console.log('[ShelterService] Prefetch skipped — no GPS/permission at startup');
+      return;
+    }
+
+    const result = await getShelters(location);
+    console.log(
+      `[ShelterService] Prefetch done: ${result.shelters.length} shelters (source: ${result.source})`,
+    );
+  } catch (err) {
+    console.warn('[ShelterService] Prefetch failed (silent):', err);
+  }
+};
+
+/**
+ * Citește shelters direct din cache (fără API), pentru afișare instant la
+ * mount-ul MapScreen. Returnează null dacă nu există cache. Combinat cu
+ * prefetchShelters (apelat la startup), permite randarea markerilor imediat,
+ * în timp ce getShelters() face refresh în fundal.
+ */
+export const getCachedShelters = async (): Promise<Shelter[] | null> => {
+  try {
+    const cached = await loadFromCache();
+    if (cached && cached.shelters.length > 0) {
+      return cached.shelters;
+    }
+    return null;
+  } catch {
+    return null;
   }
 };
 

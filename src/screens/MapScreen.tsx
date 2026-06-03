@@ -1,9 +1,8 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ActivityIndicator, PermissionsAndroid, Linking, TextInput, ScrollView, KeyboardAvoidingView, Keyboard, AppState } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
-import RNFS from 'react-native-fs';
 import Geolocation from 'react-native-geolocation-service';
-import { getShelters, refreshShelters, Shelter } from '../services/shelterService';
+import { getShelters, refreshShelters, getCachedShelters, Shelter } from '../services/shelterService';
 import {
   showNavigationOptions,
   calculateDistance,
@@ -28,6 +27,7 @@ import {
   subscribeAlertFocus,
   AlertFocus,
 } from '../services/notificationService';
+import mapResourcesService, { MapResourcesState } from '../services/mapResourcesService';
 
 // Helper function to create a circle polygon from center point and radius in km
 const createCirclePolygon = (centerLng: number, centerLat: number, radiusKm: number, points: number = 64): number[][] => {
@@ -193,52 +193,27 @@ const MapScreen = () => {
   }, [focusOnAlert]);
 
   // --- 1. SETUP HARTA OFFLINE ---
+  // Copy-ul .mbtiles se face acum în mapResourcesService (apelat din App.tsx
+  // la startup), deci când ajungem aici fișierul e de obicei deja gata.
+  // MapScreen doar se abonează la stare și mapează la state-ul local de UI.
   useEffect(() => {
-    const initMapFile = async () => {
-      try {
-        const fileName = 'romania.mbtiles';
-        const destPath = `${RNFS.DocumentDirectoryPath}/${fileName}`;
-        const exists = await RNFS.exists(destPath);
-
-        if (!exists) {
-          console.log('Copiere harta din assets...');
-          if (Platform.OS === 'android') {
-            await RNFS.copyFileAssets(fileName, destPath);
-            console.log('✅ Harta copiată cu succes pe Android');
-          } else {
-            const bundlePath = `${RNFS.MainBundlePath}/${fileName}`;
-            console.log(`Attempting to copy from: ${bundlePath}`);
-            const bundleExists = await RNFS.exists(bundlePath);
-
-            if (bundleExists) {
-              await RNFS.copyFile(bundlePath, destPath);
-              console.log('✅ Harta copiată cu succes pe iOS');
-            } else {
-              throw new Error(`Fișierul hărții nu a fost găsit: ${bundlePath}`);
-            }
-          }
-        } else {
-          console.log('✅ Harta există deja în DocumentDirectory');
-        }
-
-        // Verify the file was copied successfully
-        const finalExists = await RNFS.exists(destPath);
-        if (!finalExists) {
-          throw new Error('Fișierul hărții nu a putut fi verificat după copiere');
-        }
-
-        setMapPath(destPath);
+    const unsubscribe = mapResourcesService.subscribe((s: MapResourcesState) => {
+      setMapPath(s.mbtilesPath);
+      if (s.status === 'ready') {
         setMapError(null);
         setIsMapReady(true);
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Eroare necunoscută la încărcarea hărții';
-        console.error('❌ Eroare la copierea hărții:', error);
-        setMapError(errorMessage);
-        setMapPath(null);
+      } else if (s.status === 'error') {
+        setMapError(s.error);
         setIsMapReady(true);
+      } else {
+        // unknown / copying — încă în lucru, ținem ecranul de loading
+        setIsMapReady(false);
       }
-    };
-    initMapFile();
+    });
+    // Safety net: dacă App.tsx nu a apucat să cheme init() (ex: hot-reload pe
+    // MapScreen direct), îl pornim noi — e idempotent.
+    mapResourcesService.init().catch(() => {});
+    return unsubscribe;
   }, []);
 
   // --- 2. SETUP LOCATIE (GPS) ---
@@ -464,6 +439,16 @@ const MapScreen = () => {
     const loadShelters = async () => {
       try {
         setSheltersLoading(true);
+
+        // Afișare instant din cache (populat de prefetchShelters la startup),
+        // în timp ce getShelters() face refresh din API în fundal.
+        const cachedImmediate = await getCachedShelters();
+        if (isMounted && cachedImmediate && cachedImmediate.length > 0) {
+          setShelters(cachedImmediate);
+          setSheltersSource('cache');
+          console.log(`[MapScreen] Showing ${cachedImmediate.length} cached shelters instantly`);
+        }
+
         const result = await getShelters(userLocation);
 
         if (!isMounted) return;
@@ -820,23 +805,8 @@ const MapScreen = () => {
           onPress={() => {
             setIsMapReady(false);
             setMapError(null);
-            // Re-trigger map initialization
-            const initMapFile = async () => {
-              try {
-                const fileName = 'romania.mbtiles';
-                const destPath = `${RNFS.DocumentDirectoryPath}/${fileName}`;
-                const exists = await RNFS.exists(destPath);
-                if (exists) {
-                  setMapPath(destPath);
-                  setMapError(null);
-                }
-                setIsMapReady(true);
-              } catch (e) {
-                setMapError('Încercarea a eșuat');
-                setIsMapReady(true);
-              }
-            };
-            initMapFile();
+            // Re-trigger prin serviciu (subscribe-ul va prelua noua stare)
+            mapResourcesService.retry().catch(() => {});
           }}
         >
           <Text style={styles.retryButtonText}>Încearcă din nou</Text>

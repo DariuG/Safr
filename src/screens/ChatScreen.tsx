@@ -38,6 +38,20 @@ type Message = {
 // devin haotice (problema cu "prim ajutor" diluând signal-ul AVC).
 const QUERY_PREFIX = 'search_query: ';
 
+// Prag de hard-reject pentru retrieval RAG. Sub această valoare, query-ul e
+// considerat în afara domeniului → răspuns standard "sună la 112" fără a chema
+// LLM-ul. ATENȚIE: necesită recalibrare pe device fizic (vezi ToDo 2bis.1) —
+// după adăugarea prefixelor nomic, valoarea 0.60 e prea permisivă (lasă OOD
+// să treacă). Sursă unică de adevăr — folosită în handleTestScores (label
+// PASS/fail), handleSendMessage (reject) și debug card UI.
+const RAG_THRESHOLD = 0.6;
+
+// Lungime minimă query (caractere + cuvinte) sub care cerem reformulare.
+// Query-uri foarte scurte ("salut", "ce faci") produc embedding-uri ambigue
+// care se potrivesc întâmplător cu patternuri scurte din KB.
+const MIN_QUERY_CHARS = 15;
+const MIN_QUERY_WORDS = 3;
+
 const ChatScreen = () => {
 
 	// System prompt: instrucțiunile sunt în engleză (Llama 3.2 1B Instruct urmează
@@ -144,7 +158,7 @@ const ChatScreen = () => {
         '═══════════════════════════════════════════',
         ...top.map((m, i) => {
           const pct = (m.score * 100).toFixed(1).padStart(5, ' ');
-          const status = m.score >= 0.60 ? 'PASS' : 'fail';
+          const status = m.score >= RAG_THRESHOLD ? 'PASS' : 'fail';
           return `  ${i + 1}. ${pct}% [${m.tag}]  ${status}`;
         }),
         '═══════════════════════════════════════════',
@@ -175,6 +189,26 @@ const ChatScreen = () => {
     setIsGenerating(true);
     setUserInput('');
 
+    // Guard pe lungime minimă — query-uri foarte scurte ("salut", "ce faci")
+    // produc embedding-uri ambigue care se potrivesc întâmplător cu patternuri
+    // scurte din KB. Le respingem ÎNAINTE de embedding+LLM (economisim 1-3 min
+    // pe device fizic) și cerem reformulare. Mesajul user-ului tot se afișează,
+    // dar răspunsul e o cerere de detaliere, nu un apel LLM.
+    const wordCount = userMessage.split(/\s+/).filter(Boolean).length;
+    if (userMessage.length < MIN_QUERY_CHARS || wordCount < MIN_QUERY_WORDS) {
+      setConversation(prev => [
+        ...prev,
+        { role: 'user', content: userMessage },
+        {
+          role: 'assistant',
+          content:
+            'Te rog descrie situația în câteva cuvinte ca să te pot ajuta corect — de exemplu: "Cineva are dureri puternice în piept" sau "Cum opresc o sângerare la mână".',
+        },
+      ]);
+      setIsGenerating(false);
+      return;
+    }
+
     try {
       // Generate embedding for the user query
       let retrievedContext = '';
@@ -203,7 +237,7 @@ const ChatScreen = () => {
               0.15,
             );
 
-            // Threshold de hard-reject 0.60 calibrat empiric pe 15 queries RO.
+            // Threshold de hard-reject — vezi RAG_THRESHOLD.
             const bestScore = relevantEntries[0]?.score ?? 0;
 
             // Log minimal — array-uri mari prin Metro bridge sunt foarte
@@ -214,7 +248,7 @@ const ChatScreen = () => {
               }`,
             );
 
-            if (bestScore < 0.6) {
+            if (bestScore < RAG_THRESHOLD) {
               setConversation(prev => [
                 ...prev,
                 {
@@ -607,7 +641,7 @@ const ChatScreen = () => {
                 <Text style={styles.debugQuery} selectable>Q: {debugResult.query}</Text>
                 {debugResult.topMatches.map((m, i) => {
                   const pct = (m.score * 100).toFixed(1);
-                  const willPass = m.score >= 0.60;
+                  const willPass = m.score >= RAG_THRESHOLD;
                   return (
                     <View key={i} style={styles.debugMatch}>
                       <Text style={styles.debugMatchHeader} selectable>
@@ -625,7 +659,7 @@ const ChatScreen = () => {
                   );
                 })}
                 <Text style={styles.debugHint}>
-                  Verde = peste prag 60% (intră în context LLM). Roșu = sub prag → mesaj "sună la 112". (Loguri detaliate în Metro console.)
+                  Verde = peste prag {(RAG_THRESHOLD * 100).toFixed(0)}% (intră în context LLM). Roșu = sub prag → mesaj "sună la 112". (Loguri detaliate în Metro console.)
                 </Text>
               </View>
             )}

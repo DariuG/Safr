@@ -37,6 +37,15 @@ import { navigationRef, navigateToMap } from './src/utils/navigationRef';
 // AI models manager (background download + bundle copy)
 import modelManager from './src/services/modelManager';
 
+// Map resources (copy .mbtiles din bundle la startup, nu la mount MapScreen)
+import mapResourcesService from './src/services/mapResourcesService';
+
+// Prefetch shelters (populează cache Overpass înainte de MapScreen)
+import { prefetchShelters } from './src/services/shelterService';
+
+// Permisiune locație (cerută la startup pentru ca prefetch-ul să funcționeze)
+import { ensureLocationPermission } from './src/utils/permissions';
+
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
@@ -155,6 +164,28 @@ function App() {
       modelManager.init().catch(err => {
         console.error('[App] modelManager.init failed:', err);
       });
+
+      // Copiază harta offline (.mbtiles) din bundle în background, ca să fie
+      // gata până userul ajunge pe MapScreen (evită freeze la prima intrare).
+      mapResourcesService.init().catch(err => {
+        console.error('[App] mapResourcesService.init failed:', err);
+      });
+
+      // Cere permisiunea de locație la startup (după notificări), apoi
+      // prefetch shelters. Cerând permisiunea aici, prefetch-ul funcționează
+      // de la prima instalare; altfel permisiunea ar fi cerută abia la intrarea
+      // pe MapScreen și prefetch-ul s-ar sări (vezi shelterService.prefetchShelters).
+      // Secvențiat: așteptăm răspunsul la dialog înainte de prefetch.
+      ensureLocationPermission()
+        .then(granted => {
+          if (granted) {
+            return prefetchShelters();
+          }
+          console.log('[App] Location not granted at startup — prefetch skipped');
+        })
+        .catch(err => {
+          console.warn('[App] location/prefetch bootstrap failed:', err);
+        });
     })();
 
     // ── Deep-link la nivel global pentru tap-uri pe notificări ──

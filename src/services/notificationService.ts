@@ -5,6 +5,7 @@ import notifee, {
   EventType,
 } from '@notifee/react-native';
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   DisasterAlert,
   ALERT_TYPE_LABELS,
@@ -15,6 +16,57 @@ const CHANNEL_ID_DEFAULT = 'safr_alerts_default';
 const CHANNEL_ID_CRITICAL = 'safr_alerts_critical';
 
 let channelsInitialized = false;
+
+// ── Dedup persistent al notificărilor (TTL 48h) ──
+//
+// Aceeași alertă poate ajunge la dispozitiv prin DOUĂ căi: Firebase (online)
+// și BLE mesh (relay offline). MapScreen are un Set in-memory (`knownAlertIds`)
+// care previne dublarea în aceeași sesiune, dar acela se pierde la restart /
+// remount → alerta s-ar re-notifica. Acest strat persistent în AsyncStorage
+// asigură că o alertă deja notificată nu mai produce o a doua notificare timp
+// de 48h, indiferent de câte reporniri sau câte căi de sosire.
+const SEEN_NOTIF_KEY = '@safr_seen_alert_ids';
+const SEEN_NOTIF_TTL_MS = 48 * 60 * 60 * 1000; // 48 ore
+
+/**
+ * Verifică dacă alerta a fost deja notificată în ultimele 48h. Dacă NU, o
+ * marchează ca notificată și returnează `true` (= trebuie afișată). Dacă DA,
+ * returnează `false` (= duplicat, sări afișarea).
+ *
+ * Fail-open: la orice eroare de storage, returnează `true` (mai bine o
+ * notificare duplicată decât una ratată într-o urgență).
+ */
+export const shouldNotifyAlert = async (alertId: string): Promise<boolean> => {
+  try {
+    const now = Date.now();
+    const raw = await AsyncStorage.getItem(SEEN_NOTIF_KEY);
+    const map: Record<string, number> = raw ? JSON.parse(raw) : {};
+
+    // Curăță intrările expirate (pruning oportunist la fiecare verificare)
+    let changed = false;
+    for (const id of Object.keys(map)) {
+      if (now - map[id] >= SEEN_NOTIF_TTL_MS) {
+        delete map[id];
+        changed = true;
+      }
+    }
+
+    const seenAt = map[alertId];
+    if (seenAt !== undefined && now - seenAt < SEEN_NOTIF_TTL_MS) {
+      if (changed) {
+        await AsyncStorage.setItem(SEEN_NOTIF_KEY, JSON.stringify(map));
+      }
+      return false; // Deja notificată recent
+    }
+
+    map[alertId] = now;
+    await AsyncStorage.setItem(SEEN_NOTIF_KEY, JSON.stringify(map));
+    return true;
+  } catch (err) {
+    console.warn('[Notif] shouldNotifyAlert storage error (fail-open):', err);
+    return true;
+  }
+};
 
 /**
  * Solicită permisiunea de notificări (iOS + Android 13+).
@@ -69,6 +121,14 @@ export const initNotificationChannels = async (): Promise<void> => {
  * Severitatea determină canalul Android (default vs critical) și pattern-ul de vibrație.
  */
 export const showAlertNotification = async (alert: DisasterAlert): Promise<void> => {
+  // Dedup persistent — sări dacă alerta a mai fost notificată în ultimele 48h
+  // (a venit deja prin Firebase sau BLE, posibil într-o sesiune anterioară).
+  const shouldNotify = await shouldNotifyAlert(alert.id);
+  if (!shouldNotify) {
+    console.log('[Notif] Skipping duplicate notification for alert:', alert.id);
+    return;
+  }
+
   await initNotificationChannels();
 
   const typeLabel = ALERT_TYPE_LABELS[alert.type]?.label || alert.type;

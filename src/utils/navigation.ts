@@ -8,7 +8,6 @@ interface NavigationDestination {
 
 interface NavigationApp {
   name: string;
-  icon: string;
   getUrl: (dest: NavigationDestination, mode: 'driving' | 'walking') => string;
   checkAvailable?: () => Promise<boolean>;
 }
@@ -24,7 +23,6 @@ const travelModes = {
 const navigationApps: NavigationApp[] = [
   {
     name: 'Google Maps',
-    icon: '🗺️',
     getUrl: (dest, mode) => {
       const travelMode = travelModes.googleMaps[mode];
       if (Platform.OS === 'android') {
@@ -37,7 +35,6 @@ const navigationApps: NavigationApp[] = [
   },
   {
     name: 'Waze',
-    icon: '🚗',
     getUrl: (dest) => {
       return `https://waze.com/ul?ll=${dest.lat},${dest.lng}&navigate=yes`;
     },
@@ -46,7 +43,6 @@ const navigationApps: NavigationApp[] = [
     ? [
         {
           name: 'Apple Maps',
-          icon: '🍎',
           getUrl: (dest: NavigationDestination, mode: 'driving' | 'walking') => {
             const travelMode = travelModes.appleMaps[mode];
             return `maps://app?daddr=${dest.lat},${dest.lng}&dirflg=${travelMode}`;
@@ -105,24 +101,18 @@ export const showNavigationOptions = (
   destination: NavigationDestination,
   userLocation?: { latitude: number; longitude: number } | null
 ): void => {
-  // Build options array
-  const options = [
-    ...navigationApps.map((app) => `${app.icon} ${app.name}`),
-    'Anulează',
-  ];
-
   Alert.alert(
-    '🧭 Navigare',
+    'Navigare',
     `Alege aplicația pentru navigare către:\n${destination.label || 'destinație'}`,
     [
       // Driving options
       {
-        text: '🚗 Cu mașina',
+        text: 'Cu mașina',
         onPress: () => showAppSelector(destination, 'driving'),
       },
       // Walking options
       {
-        text: '🚶 Pe jos',
+        text: 'Pe jos',
         onPress: () => showAppSelector(destination, 'walking'),
       },
       // Cancel
@@ -148,7 +138,7 @@ const showAppSelector = (
     'Alege aplicația:',
     [
       ...navigationApps.map((app) => ({
-        text: `${app.icon} ${app.name}`,
+        text: app.name,
         onPress: async () => {
           const success = await openNavigation(app, destination, mode);
           if (!success) {

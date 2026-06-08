@@ -1,472 +1,429 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  Platform,
+  Animated,
+  LayoutAnimation,
+  Linking,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+import {
+  EMERGENCY_CATEGORIES,
+  EmergencyPlan,
+  EmergencyCategory,
+} from '../data/emergencyGuides';
 
-// --- TYPES ---
-interface EmergencyPlan {
-  id: string;
-  title: string;
-  icon: string;
-  shortDescription: string;
-  steps: string[];
-  importantNote?: string;
+// --- CHEVRON ANIMAT (reutilizat la categorii și planuri) ---
+interface ChevronProps {
+  expanded: boolean;
+  color?: string;
+  size?: number;
 }
 
-interface EmergencyCategory {
-  id: string;
-  title: string;
-  icon: string;
+const Chevron: React.FC<ChevronProps> = ({
+  expanded,
+  color = '#94A3B8',
+  size = 22,
+}) => {
+  const rotate = useRef(new Animated.Value(expanded ? 1 : 0)).current;
+
+  useEffect(() => {
+    Animated.timing(rotate, {
+      toValue: expanded ? 1 : 0,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+  }, [expanded, rotate]);
+
+  const rotation = rotate.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '180deg'],
+  });
+
+  return (
+    <Animated.View style={{ transform: [{ rotate: rotation }] }}>
+      <MaterialCommunityIcons name="chevron-down" size={size} color={color} />
+    </Animated.View>
+  );
+};
+
+// --- RÂND DE PLAN (situație concretă, expandabilă pentru pași) ---
+interface PlanRowProps {
+  plan: EmergencyPlan;
   color: string;
-  plans: EmergencyPlan[];
+  isExpanded: boolean;
+  isFirst: boolean;
+  onToggle: () => void;
 }
 
-// --- MOCK DATA ---
-const EMERGENCY_CATEGORIES: EmergencyCategory[] = [
-  {
-    id: 'natural',
-    title: 'Dezastre Naturale',
-    icon: '🌍',
-    color: '#E67E22',
-    plans: [
-      {
-        id: 'earthquake',
-        title: 'Cutremur',
-        icon: '🏚️',
-        shortDescription: 'Ce să faci în timpul unui cutremur',
-        steps: [
-          'Adăpostește-te sub o masă solidă sau lângă un perete interior',
-          'Stai departe de ferestre, oglinzi și mobilier înalt',
-          'Dacă ești afară, îndepărtează-te de clădiri și cabluri electrice',
-          'Dacă ești în mașină, oprește în siguranță și stai înăuntru',
-          'După cutremur, verifică rănirile și evacuează dacă e necesar',
-        ],
-        importantNote: 'NU alerga afară în timpul cutremurului!',
-      },
-      {
-        id: 'flood',
-        title: 'Inundație',
-        icon: '🌊',
-        shortDescription: 'Cum să te protejezi de inundații',
-        steps: [
-          'Urmărește alertele meteo și evacuează din timp dacă e necesar',
-          'Mută-te la etajele superioare ale clădirii',
-          'NU merge prin apă în mișcare - 15cm pot să te doboare',
-          'Evită podurile peste ape repezi',
-          'După inundație, nu consuma apă de la robinet până la aprobare',
-        ],
-        importantNote: 'Apa în mișcare este extrem de periculoasă!',
-      },
-      {
-        id: 'fire_wildfire',
-        title: 'Incendiu de Vegetație',
-        icon: '🔥',
-        shortDescription: 'Evacuare și protecție la incendii',
-        steps: [
-          'Evacuează imediat zona dacă autoritățile cer acest lucru',
-          'Închide toate ferestrele și ușile casei',
-          'Îndepărtează materialele inflamabile din jurul casei',
-          'Dacă ești blocat, caută o zonă fără vegetație',
-          'Acoperă-ți gura și nasul cu material umed',
-        ],
-      },
-      {
-        id: 'storm',
-        title: 'Furtună Severă',
-        icon: '⛈️',
-        shortDescription: 'Siguranță în timpul furtunilor',
-        steps: [
-          'Adăpostește-te într-o clădire solidă',
-          'Stai departe de ferestre și uși de sticlă',
-          'Deconectează aparatele electrice',
-          'Evită să folosești telefonul fix în timpul furtunii',
-          'Dacă ești afară, stai departe de copaci și stâlpi',
-        ],
-      },
-    ],
-  },
-  {
-    id: 'medical',
-    title: 'Urgențe Medicale',
-    icon: '🏥',
-    color: '#E74C3C',
-    plans: [
-      {
-        id: 'cardiac_arrest',
-        title: 'Stop Cardiac',
-        icon: '❤️',
-        shortDescription: 'Resuscitare cardio-pulmonară (RCP)',
-        steps: [
-          'Verifică dacă persoana răspunde - strigă și scutură ușor',
-          'Sună la 112 imediat',
-          'Începe compresiile toracice: 30 compresii, 5-6cm adâncime',
-          'Dacă știi, fă 2 respirații gură-la-gură după 30 compresii',
-          'Continuă până vine ambulanța sau persoana își revine',
-        ],
-        importantNote: 'Ritmul compresiilor: 100-120 pe minut!',
-      },
-      {
-        id: 'choking',
-        title: 'Înec cu Alimente',
-        icon: '😮',
-        shortDescription: 'Manevra Heimlich pentru sufocare',
-        steps: [
-          'Întreabă persoana dacă se sufocă - dacă nu poate vorbi, acționează',
-          'Poziționează-te în spatele persoanei',
-          'Pune pumnul deasupra buricului, sub stern',
-          'Execută 5 compresii abdominale rapide, în sus',
-          'Repetă până obiectul este expulzat',
-        ],
-        importantNote: 'La copii sub 1 an, tehnica este diferită!',
-      },
-      {
-        id: 'burns',
-        title: 'Arsuri',
-        icon: '🔥',
-        shortDescription: 'Primul ajutor pentru arsuri',
-        steps: [
-          'Îndepărtează sursa de căldură și hainele afectate',
-          'Răcește arsura cu apă rece 10-20 minute',
-          'NU aplica gheață, unt sau pastă de dinți',
-          'Acoperă cu un bandaj steril, fără a presa',
-          'Pentru arsuri grave (față, mâini, mari), sună la 112',
-        ],
-      },
-      {
-        id: 'bleeding',
-        title: 'Hemoragie Severă',
-        icon: '🩸',
-        shortDescription: 'Oprirea sângerărilor grave',
-        steps: [
-          'Apasă ferm pe rană cu un material curat',
-          'Menține presiunea constantă minimum 10 minute',
-          'Ridică membrul afectat deasupra nivelului inimii',
-          'Dacă sângerarea nu se oprește, aplică un garou deasupra rănii',
-          'Sună la 112 pentru hemoragii severe',
-        ],
-        importantNote: 'NU scoate obiectele înfipte în rană!',
-      },
-    ],
-  },
-  {
-    id: 'safety',
-    title: 'Siguranță Personală',
-    icon: '🛡️',
-    color: '#3498DB',
-    plans: [
-      {
-        id: 'home_fire',
-        title: 'Incendiu în Casă',
-        icon: '🏠',
-        shortDescription: 'Evacuare în caz de incendiu',
-        steps: [
-          'Alertează toți membrii familiei',
-          'Părăsește imediat clădirea - NU încerca să iei lucruri',
-          'Verifică ușile înainte să le deschizi - dacă sunt fierbinți, nu deschide',
-          'Mergi aplecat pentru a evita fumul',
-          'Întâlnește-vă la punctul de adunare prestabilit',
-        ],
-        importantNote: 'NU te întoarce în clădire sub nicio formă!',
-      },
-      {
-        id: 'gas_leak',
-        title: 'Scurgere de Gaz',
-        icon: '💨',
-        shortDescription: 'Ce să faci când simți miros de gaz',
-        steps: [
-          'NU aprinde lumina și NU folosi întrerupătoare',
-          'Deschide imediat ferestrele',
-          'Închide robinetul de gaz dacă e accesibil',
-          'Evacuează clădirea',
-          'Sună la 112 sau distribuitor de gaz de afară',
-        ],
-        importantNote: 'NU folosi telefonul în interior!',
-      },
-      {
-        id: 'car_accident',
-        title: 'Accident Rutier',
-        icon: '🚗',
-        shortDescription: 'Pași de urmat la un accident',
-        steps: [
-          'Oprește motorul și pornește luminile de avarie',
-          'Verifică dacă tu și pasagerii sunteți răniți',
-          'Sună la 112 dacă sunt răniți sau pagube mari',
-          'Pune triunghiul reflectorizant la 50m în spate',
-          'Fă poze la locul accidentului și schimbă date cu celălalt șofer',
-        ],
-      },
-      {
-        id: 'power_outage',
-        title: 'Pană de Curent',
-        icon: '🔦',
-        shortDescription: 'Gestionarea unei pene de curent',
-        steps: [
-          'Verifică dacă e pană locală sau generală',
-          'Deconectează aparatele sensibile pentru a evita supratensiunea',
-          'Folosește lanterne, nu lumânări (risc incendiu)',
-          'Păstrează frigiderul închis pentru a menține frigul',
-          'Raportează pana la distribuitor dacă durează',
-        ],
-      },
-    ],
-  },
-];
+const PlanRow: React.FC<PlanRowProps> = ({
+  plan,
+  color,
+  isExpanded,
+  isFirst,
+  onToggle,
+}) => {
+  return (
+    <View style={[styles.planRow, !isFirst && styles.planRowDivider]}>
+      <TouchableOpacity
+        style={styles.planRowHeader}
+        onPress={onToggle}
+        activeOpacity={0.6}>
+        <View style={[styles.planIconChip, { backgroundColor: color + '14' }]}>
+          <MaterialCommunityIcons name={plan.icon} size={20} color={color} />
+        </View>
+        <View style={styles.planTitleContainer}>
+          <Text style={styles.planTitle}>{plan.title}</Text>
+          <Text style={styles.planDescription}>{plan.shortDescription}</Text>
+        </View>
+        <Chevron expanded={isExpanded} size={20} />
+      </TouchableOpacity>
 
-// --- COMPONENT ---
+      {isExpanded && (
+        <View style={styles.planContent}>
+          {plan.importantNote && (
+            <View
+              style={[
+                styles.importantNote,
+                { backgroundColor: color + '12', borderLeftColor: color },
+              ]}>
+              <MaterialCommunityIcons
+                name="alert"
+                size={18}
+                color={color}
+                style={styles.importantNoteIcon}
+              />
+              <Text style={[styles.importantNoteText, { color }]}>
+                {plan.importantNote}
+              </Text>
+            </View>
+          )}
+
+          <Text style={styles.stepsTitle}>Pași de urmat</Text>
+          {plan.steps.map((step, index) => (
+            <View key={index} style={styles.stepItem}>
+              <View style={[styles.stepNumber, { backgroundColor: color }]}>
+                <Text style={styles.stepNumberText}>{index + 1}</Text>
+              </View>
+              <Text style={styles.stepText}>{step}</Text>
+            </View>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+};
+
+// --- CARD DE CATEGORIE (drop-down) ---
+interface CategoryCardProps {
+  category: EmergencyCategory;
+  isOpen: boolean;
+  openPlan: string | null;
+  onToggleCategory: () => void;
+  onTogglePlan: (planId: string) => void;
+}
+
+const CategoryCard: React.FC<CategoryCardProps> = ({
+  category,
+  isOpen,
+  openPlan,
+  onToggleCategory,
+  onTogglePlan,
+}) => {
+  return (
+    <View style={styles.categoryCard}>
+      <TouchableOpacity
+        style={styles.categoryHeader}
+        onPress={onToggleCategory}
+        activeOpacity={0.7}>
+        <View
+          style={[
+            styles.categoryIconChip,
+            { backgroundColor: category.color + '14' },
+          ]}>
+          <MaterialCommunityIcons
+            name={category.icon}
+            size={22}
+            color={category.color}
+          />
+        </View>
+        <Text style={styles.categoryTitle}>{category.title}</Text>
+        <Text style={styles.categoryCount}>{category.plans.length}</Text>
+        <Chevron expanded={isOpen} />
+      </TouchableOpacity>
+
+      {isOpen && (
+        <View style={styles.categoryBody}>
+          {category.plans.map((plan, index) => (
+            <PlanRow
+              key={plan.id}
+              plan={plan}
+              color={category.color}
+              isFirst={index === 0}
+              isExpanded={openPlan === plan.id}
+              onToggle={() => onTogglePlan(plan.id)}
+            />
+          ))}
+        </View>
+      )}
+    </View>
+  );
+};
+
+// --- ECRAN ---
 const EmergencyScreen = () => {
-  const [expandedPlan, setExpandedPlan] = useState<string | null>(null);
+  const insets = useSafeAreaInsets();
+  const [openCategory, setOpenCategory] = useState<string | null>(null);
+  const [openPlan, setOpenPlan] = useState<string | null>(null);
+
+  const toggleCategory = (categoryId: string) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setOpenCategory(prev => (prev === categoryId ? null : categoryId));
+  };
 
   const togglePlan = (planId: string) => {
-    setExpandedPlan(expandedPlan === planId ? null : planId);
-  };
-
-  const renderPlanCard = (plan: EmergencyPlan, categoryColor: string) => {
-    const isExpanded = expandedPlan === plan.id;
-
-    return (
-      <TouchableOpacity
-        key={plan.id}
-        style={[styles.planCard, isExpanded && styles.planCardExpanded]}
-        onPress={() => togglePlan(plan.id)}
-        activeOpacity={0.7}
-      >
-        <View style={styles.planHeader}>
-          <Text style={styles.planIcon}>{plan.icon}</Text>
-          <View style={styles.planTitleContainer}>
-            <Text style={styles.planTitle}>{plan.title}</Text>
-            <Text style={styles.planDescription}>{plan.shortDescription}</Text>
-          </View>
-          <Text style={styles.expandIcon}>{isExpanded ? '▲' : '▼'}</Text>
-        </View>
-
-        {isExpanded && (
-          <View style={styles.planContent}>
-            {plan.importantNote && (
-              <View style={[styles.importantNote, { backgroundColor: categoryColor + '20' }]}>
-                <Text style={[styles.importantNoteText, { color: categoryColor }]}>
-                  ⚠️ {plan.importantNote}
-                </Text>
-              </View>
-            )}
-
-            <Text style={styles.stepsTitle}>Pași de urmat:</Text>
-            {plan.steps.map((step, index) => (
-              <View key={index} style={styles.stepItem}>
-                <View style={[styles.stepNumber, { backgroundColor: categoryColor }]}>
-                  <Text style={styles.stepNumberText}>{index + 1}</Text>
-                </View>
-                <Text style={styles.stepText}>{step}</Text>
-              </View>
-            ))}
-          </View>
-        )}
-      </TouchableOpacity>
-    );
-  };
-
-  const renderCategory = (category: EmergencyCategory) => {
-    return (
-      <View key={category.id} style={styles.categoryContainer}>
-        <View style={[styles.categoryHeader, { backgroundColor: category.color }]}>
-          <Text style={styles.categoryIcon}>{category.icon}</Text>
-          <Text style={styles.categoryTitle}>{category.title}</Text>
-        </View>
-
-        <View style={styles.plansContainer}>
-          {category.plans.map((plan) => renderPlanCard(plan, category.color))}
-        </View>
-      </View>
-    );
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setOpenPlan(prev => (prev === planId ? null : planId));
   };
 
   return (
     <View style={styles.container}>
       <ScrollView
         style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
-        <Text style={styles.screenTitle}>Ghid de Urgență</Text>
+        contentContainerStyle={[
+          styles.scrollContent,
+          { paddingTop: insets.top + 16 },
+        ]}
+        showsVerticalScrollIndicator={false}>
+        <Text style={styles.screenTitle}>Ghid de urgență</Text>
         <Text style={styles.screenSubtitle}>
-          Planuri de acțiune pentru situații de urgență
+          Planuri de acțiune pentru situații critice
         </Text>
 
-        {EMERGENCY_CATEGORIES.map(renderCategory)}
+        {EMERGENCY_CATEGORIES.map(category => (
+          <CategoryCard
+            key={category.id}
+            category={category}
+            isOpen={openCategory === category.id}
+            openPlan={openPlan}
+            onToggleCategory={() => toggleCategory(category.id)}
+            onTogglePlan={togglePlan}
+          />
+        ))}
 
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>
-            În caz de urgență, sună la 112
-          </Text>
-        </View>
+        <TouchableOpacity
+          style={styles.callButton}
+          activeOpacity={0.85}
+          onPress={() => Linking.openURL('tel:112')}>
+          <MaterialCommunityIcons name="phone" size={20} color="#FFFFFF" />
+          <Text style={styles.callButtonText}>Sună la 112</Text>
+        </TouchableOpacity>
+        <Text style={styles.footerHint}>
+          Numărul unic de urgență, disponibil non-stop.
+        </Text>
       </ScrollView>
     </View>
   );
 };
 
-// --- STYLES ---
+// --- STILURI ---
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F5F5F5',
+    backgroundColor: '#F1F5F9',
   },
   scrollView: {
     flex: 1,
   },
   scrollContent: {
-    paddingTop: Platform.OS === 'ios' ? 70 : 50,
-    paddingBottom: 100,
-    paddingHorizontal: 15,
+    paddingBottom: 130,
+    paddingHorizontal: 18,
   },
   screenTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#1a1a1a',
-    marginBottom: 5,
+    fontSize: 30,
+    fontWeight: '800',
+    color: '#0F172A',
+    letterSpacing: -0.5,
     textAlign: 'center',
   },
   screenSubtitle: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 20,
+    fontSize: 15,
+    color: '#64748B',
+    marginTop: 4,
+    marginBottom: 24,
     textAlign: 'center',
   },
 
-  // Category
-  categoryContainer: {
-    marginBottom: 20,
-    borderRadius: 12,
-    backgroundColor: 'white',
+  // Card categorie (drop-down)
+  categoryCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#E8EDF3',
     overflow: 'hidden',
-    elevation: 2,
-    shadowColor: '#000',
+    shadowColor: '#0F172A',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+    shadowOpacity: 0.05,
+    shadowRadius: 10,
+    elevation: 2,
   },
   categoryHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 15,
+    padding: 16,
   },
-  categoryIcon: {
-    fontSize: 24,
-    marginRight: 10,
+  categoryIconChip: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
   },
   categoryTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  categoryCount: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#94A3B8',
+    backgroundColor: '#F1F5F9',
+    overflow: 'hidden',
+    borderRadius: 10,
+    paddingHorizontal: 9,
+    paddingVertical: 2,
+    marginRight: 10,
+  },
+  categoryBody: {
+    paddingHorizontal: 16,
+    paddingBottom: 6,
   },
 
-  // Plans
-  plansContainer: {
-    padding: 10,
+  // Rând plan (situație)
+  planRow: {
+    paddingVertical: 2,
   },
-  planCard: {
-    backgroundColor: '#FAFAFA',
-    borderRadius: 10,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#E0E0E0',
+  planRowDivider: {
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
   },
-  planCardExpanded: {
-    backgroundColor: 'white',
-    borderColor: '#CCC',
-  },
-  planHeader: {
+  planRowHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
+    paddingVertical: 14,
   },
-  planIcon: {
-    fontSize: 28,
-    marginRight: 12,
+  planIconChip: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 13,
   },
   planTitleContainer: {
     flex: 1,
   },
   planTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
+    fontSize: 15.5,
+    fontWeight: '700',
+    color: '#0F172A',
   },
   planDescription: {
-    fontSize: 12,
-    color: '#666',
+    fontSize: 12.5,
+    color: '#64748B',
     marginTop: 2,
   },
-  expandIcon: {
-    fontSize: 12,
-    color: '#999',
-    marginLeft: 10,
-  },
 
-  // Plan content
+  // Conținut extins (pași)
   planContent: {
-    paddingHorizontal: 12,
-    paddingBottom: 15,
-    borderTopWidth: 1,
-    borderTopColor: '#EEE',
-    marginTop: 5,
-    paddingTop: 12,
+    paddingBottom: 14,
+    paddingLeft: 2,
   },
   importantNote: {
-    padding: 10,
-    borderRadius: 8,
-    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    borderRadius: 12,
+    borderLeftWidth: 3,
+    marginBottom: 16,
+  },
+  importantNoteIcon: {
+    marginRight: 9,
   },
   importantNoteText: {
+    flex: 1,
     fontSize: 13,
     fontWeight: '600',
+    lineHeight: 19,
   },
   stepsTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 10,
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#94A3B8',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 12,
   },
   stepItem: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    marginBottom: 10,
+    marginBottom: 12,
   },
   stepNumber: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    width: 24,
+    height: 24,
+    borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 10,
-    marginTop: 2,
+    marginRight: 12,
+    marginTop: 1,
   },
   stepNumberText: {
-    color: 'white',
-    fontSize: 12,
-    fontWeight: 'bold',
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
   },
   stepText: {
     flex: 1,
-    fontSize: 14,
-    color: '#444',
-    lineHeight: 20,
+    fontSize: 14.5,
+    color: '#334155',
+    lineHeight: 21,
   },
 
-  // Footer
-  footer: {
+  // Buton 112
+  callButton: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 20,
-    marginTop: 10,
+    justifyContent: 'center',
+    backgroundColor: '#DC2626',
+    borderRadius: 16,
+    paddingVertical: 16,
+    marginTop: 4,
+    shadowColor: '#DC2626',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 4,
   },
-  footerText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#E74C3C',
+  callButtonText: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '700',
+    marginLeft: 9,
+  },
+  footerHint: {
+    textAlign: 'center',
+    fontSize: 12.5,
+    color: '#94A3B8',
+    marginTop: 12,
   },
 });
 

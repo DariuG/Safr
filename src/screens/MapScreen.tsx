@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert, ActivityIndicator, PermissionsAndroid, Linking, TextInput, ScrollView, KeyboardAvoidingView, Keyboard, AppState } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
+import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Geolocation from 'react-native-geolocation-service';
 import { getShelters, refreshShelters, getCachedShelters, Shelter } from '../services/shelterService';
 import {
@@ -64,9 +66,21 @@ const createCirclePolygon = (centerLng: number, centerLat: number, radiusKm: num
 // Location permission status type
 type LocationPermissionStatus = 'granted' | 'denied' | 'disabled' | 'restricted' | 'unavailable';
 
+// Iconițe MaterialCommunityIcons per tip de alertă
+// ALERT_TYPE_LABELS pentru render-ul pe hartă și în carduri.
+const ALERT_TYPE_MDI: Record<AlertType, string> = {
+  earthquake: 'home-alert-outline',
+  flood: 'waves',
+  fire: 'fire',
+  storm: 'weather-lightning-rainy',
+  war: 'bomb',
+  other: 'alert',
+};
+
 const MapScreen = () => {
   // Auth state
   const { isAdmin } = useAuth();
+  const insets = useSafeAreaInsets();
 
   const [selectedLocation, setSelectedLocation] = useState<Shelter | null>(null);
 
@@ -141,7 +155,7 @@ const MapScreen = () => {
     const typeLabel = ALERT_TYPE_LABELS[alert.type]?.label || alert.type;
     const severityLabel = ALERT_SEVERITY_LABELS[alert.severity]?.label || alert.severity;
     Alert.alert(
-      `${ALERT_TYPE_LABELS[alert.type]?.icon || ''} Alerta noua`,
+      'Alertă nouă',
       `${typeLabel} — Severitate: ${severityLabel}\n\n${alert.message}`,
       [
         {text: 'OK', style: 'cancel'},
@@ -348,7 +362,7 @@ const MapScreen = () => {
       isMounted = false;
       if (watchId !== null) {
         Geolocation.clearWatch(watchId);
-        console.log('✅ GPS watch cleared');
+        console.log('GPS watch cleared');
       }
     };
   }, [requestLocationPermission, getLocationErrorMessage]);
@@ -672,7 +686,7 @@ const MapScreen = () => {
   // --- HANDLE DELETE ALERT (admin only) ---
   const handleDeleteAlert = useCallback(async (alertId: string) => {
     Alert.alert(
-      'Șterge Alerta',
+      'Șterge alerta',
       'Ești sigur că vrei să ștergi această alertă? Acțiunea este ireversibilă.',
       [
         { text: 'Anulează', style: 'cancel' },
@@ -733,17 +747,17 @@ const MapScreen = () => {
   const getMarkerStyle = (type: Shelter['type']): { color: string; icon: string; borderColor: string } => {
     switch (type) {
       case 'hospital':
-        return { color: '#DC2626', icon: 'H', borderColor: '#991B1B' };    // Red with H
+        return { color: '#DC2626', icon: 'hospital', borderColor: '#991B1B' };
       case 'pharmacy':
-        return { color: '#16A34A', icon: '+', borderColor: '#166534' };   // Green with +
+        return { color: '#16A34A', icon: 'plus', borderColor: '#166534' };
       case 'fire':
-        return { color: '#EA580C', icon: 'F', borderColor: '#9A3412' };   // Orange with F
+        return { color: '#EA580C', icon: 'fire-truck', borderColor: '#9A3412' };
       case 'police':
-        return { color: '#2563EB', icon: 'P', borderColor: '#1E40AF' };   // Blue with P
+        return { color: '#2563EB', icon: 'police-badge', borderColor: '#1E40AF' };
       case 'bunker':
-        return { color: '#7C3AED', icon: 'S', borderColor: '#5B21B6' };   // Purple with S (Shelter)
+        return { color: '#7C3AED', icon: 'shield-home', borderColor: '#5B21B6' };
       default:
-        return { color: '#6B7280', icon: '•', borderColor: '#374151' };   // Gray with dot
+        return { color: '#6B7280', icon: 'map-marker', borderColor: '#374151' };
     }
   };
 
@@ -777,7 +791,7 @@ const MapScreen = () => {
           backgroundColor: color,
           borderColor: borderColor,
         }]}>
-          <Text style={[styles.markerIcon, { fontSize: isHospital ? 12 : 10 }]}>{icon}</Text>
+          <MaterialCommunityIcons name={icon} size={isHospital ? 13 : 11} color="#FFFFFF" />
         </View>
       </MapLibreGL.PointAnnotation>
     );
@@ -787,7 +801,7 @@ const MapScreen = () => {
   if (!isMapReady) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#007AFF" />
+        <ActivityIndicator size="large" color="#2563EB" />
         <Text style={styles.loadingText}>Se încarcă harta offline...</Text>
       </View>
     );
@@ -797,7 +811,7 @@ const MapScreen = () => {
   if (mapError) {
     return (
       <View style={styles.errorContainer}>
-        <Text style={styles.errorIcon}>🗺️</Text>
+        <MaterialCommunityIcons name="map-search-outline" size={64} color="#94A3B8" style={styles.errorIcon} />
         <Text style={styles.errorTitle}>Harta nu a putut fi încărcată</Text>
         <Text style={styles.errorMessage}>{mapError}</Text>
         <TouchableOpacity
@@ -907,7 +921,7 @@ const MapScreen = () => {
             }}
           >
             <View style={[styles.alertMarker, { borderColor: ALERT_SEVERITY_LABELS[alert.severity].color }]}>
-              <Text style={styles.alertMarkerIcon}>{ALERT_TYPE_LABELS[alert.type].icon}</Text>
+              <MaterialCommunityIcons name={ALERT_TYPE_MDI[alert.type]} size={18} color={ALERT_SEVERITY_LABELS[alert.severity].color} />
             </View>
           </MapLibreGL.PointAnnotation>
         ))}
@@ -919,7 +933,7 @@ const MapScreen = () => {
             coordinate={[alertTapLocation.lng, alertTapLocation.lat]}
           >
             <View style={styles.alertTapMarker}>
-              <Text style={styles.alertTapMarkerText}>📍</Text>
+              <MaterialCommunityIcons name="map-marker" size={40} color="#DC2626" />
             </View>
           </MapLibreGL.PointAnnotation>
         )}
@@ -929,9 +943,9 @@ const MapScreen = () => {
 
       {/* --- LOCATION ERROR BANNER --- */}
       {locationError && (
-        <View style={styles.locationErrorBanner}>
+        <View style={[styles.locationErrorBanner, { top: insets.top + 64 }]}>
           <View style={styles.locationErrorContent}>
-            <Text style={styles.locationErrorIcon}>⚠️</Text>
+            <MaterialCommunityIcons name="alert" size={18} color="#F59E0B" style={styles.locationErrorIcon} />
             <Text style={styles.locationErrorText}>{locationError}</Text>
           </View>
           {(locationPermissionStatus === 'denied' || locationPermissionStatus === 'restricted') && (
@@ -944,9 +958,9 @@ const MapScreen = () => {
 
       {/* --- GPS REQUIRED BANNER (pentru shelters) --- */}
       {!userLocation && !locationError && (
-        <View style={styles.locationErrorBanner}>
+        <View style={[styles.locationErrorBanner, { top: insets.top + 64 }]}>
           <View style={styles.locationErrorContent}>
-            <Text style={styles.locationErrorIcon}>📍</Text>
+            <MaterialCommunityIcons name="crosshairs-gps" size={18} color="#F59E0B" style={styles.locationErrorIcon} />
             <Text style={styles.locationErrorText}>
               Activează GPS-ul pentru a vedea locațiile de urgență din zona ta.
             </Text>
@@ -955,7 +969,7 @@ const MapScreen = () => {
       )}
 
       {/* --- DATA SOURCE BADGE & ALERTS BUTTON --- */}
-      <View style={styles.topLeftContainer}>
+      <View style={[styles.topLeftContainer, { top: insets.top + 12 }]}>
         {sheltersLoading ? (
           <View style={[styles.dataBadge, styles.dataBadgeLoading]}>
             <ActivityIndicator size="small" color="#666" />
@@ -970,14 +984,19 @@ const MapScreen = () => {
               sheltersSource === 'fallback' && styles.dataBadgeFallback,
             ]}
             onPress={handleRefreshShelters}
+            accessibilityRole="button"
+            accessibilityLabel="Reîmprospătează locațiile"
           >
-            <Text style={styles.dataBadgeIcon}>
-              {sheltersSource === 'api' ? '🌐' : sheltersSource === 'cache' ? '💾' : '⚠️'}
-            </Text>
+            <MaterialCommunityIcons
+              name={sheltersSource === 'api' ? 'web' : sheltersSource === 'cache' ? 'database' : 'alert'}
+              size={14}
+              color={sheltersSource === 'api' ? '#16A34A' : sheltersSource === 'cache' ? '#D97706' : '#DC2626'}
+              style={styles.dataBadgeIcon}
+            />
             <Text style={styles.dataBadgeText}>
               {filteredShelters.length}/{shelters.length} locații • {sheltersSource === 'api' ? 'Live' : sheltersSource === 'cache' ? 'Cache' : 'Offline'}
             </Text>
-            <Text style={styles.dataBadgeRefresh}>🔄</Text>
+            <MaterialCommunityIcons name="refresh" size={14} color="#64748B" style={styles.dataBadgeRefresh} />
           </TouchableOpacity>
         )}
 
@@ -986,7 +1005,7 @@ const MapScreen = () => {
           style={[styles.alertsButton, alerts.length > 0 && styles.alertsButtonActive]}
           onPress={() => setShowAlertsModal(true)}
         >
-          <Text style={styles.alertsButtonIcon}>🚨</Text>
+          <MaterialCommunityIcons name="alarm-light" size={15} color={alerts.length > 0 ? '#DC2626' : '#64748B'} style={styles.alertsButtonIcon} />
           <Text style={styles.alertsButtonText}>
             Alerte active ({alerts.length})
           </Text>
@@ -1036,30 +1055,44 @@ const MapScreen = () => {
       </View>
 
       {/* --- BUTTONS --- */}
-      <View style={styles.controls}>
+      <View style={[styles.controls, { top: insets.top + 74 }]}>
         <TouchableOpacity
           style={[styles.controlBtn, !userLocation && styles.controlBtnDisabled]}
           onPress={centerOnUser}
+          accessibilityRole="button"
+          accessibilityLabel="Centrează pe locația mea"
         >
-          <Text style={styles.btnText}>📍</Text>
+          <MaterialCommunityIcons name="crosshairs-gps" size={22} color="#333" />
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.controlBtn, {marginTop: 10}]} onPress={handleZoomIn}>
-          <Text style={styles.btnText}>+</Text>
+        <TouchableOpacity
+          style={[styles.controlBtn, {marginTop: 10}]}
+          onPress={handleZoomIn}
+          accessibilityRole="button"
+          accessibilityLabel="Mărește harta"
+        >
+          <MaterialCommunityIcons name="plus" size={24} color="#333" />
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.controlBtn, {marginTop: 10}]} onPress={handleZoomOut}>
-          <Text style={styles.btnText}>−</Text>
+        <TouchableOpacity
+          style={[styles.controlBtn, {marginTop: 10}]}
+          onPress={handleZoomOut}
+          accessibilityRole="button"
+          accessibilityLabel="Micșorează harta"
+        >
+          <MaterialCommunityIcons name="minus" size={24} color="#333" />
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.controlBtn, styles.filterBtn, showFilterMenu && styles.filterBtnActive]}
           onPress={() => setShowFilterMenu(!showFilterMenu)}
+          accessibilityRole="button"
+          accessibilityLabel="Filtrează locațiile"
         >
-          <Text style={styles.btnText}>⚙</Text>
+          <MaterialCommunityIcons name="tune-variant" size={22} color={showFilterMenu ? '#FFFFFF' : '#333'} />
         </TouchableOpacity>
       </View>
 
       {/* --- FILTER MENU --- */}
       {showFilterMenu && (
-        <View style={styles.filterMenu}>
+        <View style={[styles.filterMenu, { top: insets.top + 74 }]}>
           <View style={styles.filterHeader}>
             <Text style={styles.filterTitle}>Filtrează</Text>
             <TouchableOpacity onPress={toggleAllFilters}>
@@ -1070,11 +1103,11 @@ const MapScreen = () => {
           </View>
 
           {([
-            { type: 'hospital' as const, label: 'Spitale', icon: 'H' },
-            { type: 'pharmacy' as const, label: 'Farmacii', icon: '+' },
-            { type: 'fire' as const, label: 'Pompieri', icon: 'F' },
-            { type: 'police' as const, label: 'Poliție', icon: 'P' },
-            { type: 'bunker' as const, label: 'Adăposturi', icon: 'S' },
+            { type: 'hospital' as const, label: 'Spitale', icon: 'hospital' },
+            { type: 'pharmacy' as const, label: 'Farmacii', icon: 'plus' },
+            { type: 'fire' as const, label: 'Pompieri', icon: 'fire-truck' },
+            { type: 'police' as const, label: 'Poliție', icon: 'police-badge' },
+            { type: 'bunker' as const, label: 'Adăposturi', icon: 'shield-home' },
           ]).map(({ type, label, icon }) => {
             const isActive = activeFilters.has(type);
             const style = getMarkerStyle(type);
@@ -1087,14 +1120,14 @@ const MapScreen = () => {
                 onPress={() => toggleFilter(type)}
               >
                 <View style={[styles.filterIcon, { backgroundColor: style.color, borderColor: style.borderColor }]}>
-                  <Text style={styles.filterIconText}>{icon}</Text>
+                  <MaterialCommunityIcons name={icon} size={13} color="#FFFFFF" />
                 </View>
                 <Text style={[styles.filterLabel, !isActive && styles.filterLabelInactive]}>
                   {label}
                 </Text>
                 <Text style={styles.filterCount}>{count}</Text>
                 <View style={[styles.filterCheckbox, isActive && styles.filterCheckboxActive]}>
-                  {isActive && <Text style={styles.filterCheckmark}>✓</Text>}
+                  {isActive && <MaterialCommunityIcons name="check" size={13} color="#FFFFFF" />}
                 </View>
               </TouchableOpacity>
             );
@@ -1138,15 +1171,15 @@ const MapScreen = () => {
                 return (
                   <>
                     <View style={styles.distanceItem}>
-                      <Text style={styles.distanceIcon}>📍</Text>
+                      <MaterialCommunityIcons name="map-marker-distance" size={18} color="#2563EB" style={styles.distanceIcon} />
                       <Text style={styles.distanceText}>{formatDistance(distance)}</Text>
                     </View>
                     <View style={styles.distanceItem}>
-                      <Text style={styles.distanceIcon}>🚗</Text>
+                      <MaterialCommunityIcons name="car" size={18} color="#2563EB" style={styles.distanceIcon} />
                       <Text style={styles.distanceText}>{formatTravelTime(drivingTime)}</Text>
                     </View>
                     <View style={styles.distanceItem}>
-                      <Text style={styles.distanceIcon}>🚶</Text>
+                      <MaterialCommunityIcons name="walk" size={18} color="#2563EB" style={styles.distanceIcon} />
                       <Text style={styles.distanceText}>{formatTravelTime(walkingTime)}</Text>
                     </View>
                   </>
@@ -1156,7 +1189,7 @@ const MapScreen = () => {
           )}
 
           {!userLocation && (
-            <Text style={styles.cardNoLocation}>📍 Activează GPS pentru distanță</Text>
+            <Text style={styles.cardNoLocation}>Activează GPS pentru distanță</Text>
           )}
 
           <TouchableOpacity
@@ -1166,7 +1199,8 @@ const MapScreen = () => {
               userLocation
             )}
           >
-            <Text style={styles.navButtonText}>🧭 Navighează</Text>
+            <MaterialCommunityIcons name="navigation-variant" size={18} color="#FFFFFF" style={styles.navButtonIcon} />
+            <Text style={styles.navButtonText}>Navighează</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -1180,12 +1214,17 @@ const MapScreen = () => {
           />
           <View style={styles.alertsModalContainer}>
             <View style={styles.alertsModalHeader}>
-              <Text style={styles.alertsModalTitle}>🚨 Alerte Active</Text>
+              <View style={styles.alertsModalTitleRow}>
+                <MaterialCommunityIcons name="alarm-light" size={20} color="#DC2626" style={styles.alertsModalTitleIcon} />
+                <Text style={styles.alertsModalTitle}>Alerte active</Text>
+              </View>
               <TouchableOpacity
                 onPress={() => setShowAlertsModal(false)}
                 style={styles.alertsModalClose}
+                accessibilityRole="button"
+                accessibilityLabel="Închide"
               >
-                <Text style={styles.alertsModalCloseText}>✕</Text>
+                <MaterialCommunityIcons name="close" size={18} color="#64748B" />
               </TouchableOpacity>
             </View>
 
@@ -1196,7 +1235,7 @@ const MapScreen = () => {
             >
               {alerts.length === 0 ? (
                 <View style={styles.alertsModalEmpty}>
-                  <Text style={styles.alertsModalEmptyIcon}>✅</Text>
+                  <MaterialCommunityIcons name="check-circle-outline" size={48} color="#22C55E" style={styles.alertsModalEmptyIcon} />
                   <Text style={styles.alertsModalEmptyText}>
                     Nu există alerte active în acest moment.
                   </Text>
@@ -1211,9 +1250,12 @@ const MapScreen = () => {
                           { backgroundColor: ALERT_SEVERITY_LABELS[alert.severity].color },
                         ]}
                       >
-                        <Text style={styles.alertCardBadgeText}>
-                          {ALERT_TYPE_LABELS[alert.type].icon} {ALERT_TYPE_LABELS[alert.type].label}
-                        </Text>
+                        <View style={styles.alertCardBadgeRow}>
+                          <MaterialCommunityIcons name={ALERT_TYPE_MDI[alert.type]} size={13} color="#FFFFFF" style={styles.alertCardBadgeIcon} />
+                          <Text style={styles.alertCardBadgeText}>
+                            {ALERT_TYPE_LABELS[alert.type].label}
+                          </Text>
+                        </View>
                       </View>
                       <Text
                         style={[
@@ -1228,20 +1270,29 @@ const MapScreen = () => {
                     <Text style={styles.alertCardMessage}>{alert.message}</Text>
 
                     <View style={styles.alertCardDetails}>
-                      <Text style={styles.alertCardDetail}>
-                        📍 {alert.lat.toFixed(4)}, {alert.lng.toFixed(4)}
-                      </Text>
-                      <Text style={styles.alertCardDetail}>
-                        📐 Rază: {alert.radius} km
-                      </Text>
-                      <Text style={styles.alertCardDetail}>
-                        ⏰ Expiră: {new Date(alert.expiresAt).toLocaleString('ro-RO', {
-                          day: '2-digit',
-                          month: '2-digit',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })}
-                      </Text>
+                      <View style={styles.alertCardDetailRow}>
+                        <MaterialCommunityIcons name="map-marker" size={13} color="#94A3B8" style={styles.alertCardDetailIcon} />
+                        <Text style={styles.alertCardDetail}>
+                          {alert.lat.toFixed(4)}, {alert.lng.toFixed(4)}
+                        </Text>
+                      </View>
+                      <View style={styles.alertCardDetailRow}>
+                        <MaterialCommunityIcons name="map-marker-radius" size={13} color="#94A3B8" style={styles.alertCardDetailIcon} />
+                        <Text style={styles.alertCardDetail}>
+                          Rază: {alert.radius} km
+                        </Text>
+                      </View>
+                      <View style={styles.alertCardDetailRow}>
+                        <MaterialCommunityIcons name="clock-outline" size={13} color="#94A3B8" style={styles.alertCardDetailIcon} />
+                        <Text style={styles.alertCardDetail}>
+                          Expiră: {new Date(alert.expiresAt).toLocaleString('ro-RO', {
+                            day: '2-digit',
+                            month: '2-digit',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </Text>
+                      </View>
                     </View>
 
                     <View style={styles.alertCardActions}>
@@ -1273,7 +1324,10 @@ const MapScreen = () => {
                           {deletingAlertId === alert.id ? (
                             <ActivityIndicator color="#DC2626" size="small" />
                           ) : (
-                            <Text style={styles.alertCardDeleteBtnText}>🗑️ Șterge</Text>
+                            <View style={styles.alertCardDeleteBtnRow}>
+                              <MaterialCommunityIcons name="delete" size={14} color="#DC2626" style={styles.alertCardDeleteBtnIcon} />
+                              <Text style={styles.alertCardDeleteBtnText}>Șterge</Text>
+                            </View>
                           )}
                         </TouchableOpacity>
                       )}
@@ -1304,21 +1358,21 @@ const MapScreen = () => {
             {/* Header compact: titlu + coordonate + close */}
             <View style={styles.alertFormHeader}>
               <View>
-                <Text style={styles.alertFormTitle}>Creare Alerta</Text>
+                <Text style={styles.alertFormTitle}>Creare alertă</Text>
                 <Text style={styles.alertFormCoords}>
-                  📍 {alertTapLocation.lat.toFixed(5)}, {alertTapLocation.lng.toFixed(5)}
+                  {alertTapLocation.lat.toFixed(5)}, {alertTapLocation.lng.toFixed(5)}
                 </Text>
               </View>
-              <TouchableOpacity onPress={() => { Keyboard.dismiss(); handleCancelAlert(); }} style={styles.alertFormClose}>
-                <Text style={styles.alertFormCloseText}>✕</Text>
+              <TouchableOpacity onPress={() => { Keyboard.dismiss(); handleCancelAlert(); }} style={styles.alertFormClose} accessibilityRole="button" accessibilityLabel="Închide">
+                <MaterialCommunityIcons name="close" size={18} color="#64748B" />
               </TouchableOpacity>
             </View>
 
             {/* Tip alertă — grid compact */}
-            <Text style={styles.alertFormLabel}>Tip alerta</Text>
+            <Text style={styles.alertFormLabel}>Tip alertă</Text>
             <View style={styles.alertTypeGrid}>
               {(Object.keys(ALERT_TYPE_LABELS) as AlertType[]).map(type => {
-                const { label, icon, color } = ALERT_TYPE_LABELS[type];
+                const { label, color } = ALERT_TYPE_LABELS[type];
                 const isSelected = alertType === type;
                 return (
                   <TouchableOpacity
@@ -1329,7 +1383,7 @@ const MapScreen = () => {
                     ]}
                     onPress={() => setAlertType(type)}
                   >
-                    <Text style={styles.alertTypeIcon}>{icon}</Text>
+                    <MaterialCommunityIcons name={ALERT_TYPE_MDI[type]} size={20} color={isSelected ? '#FFFFFF' : '#64748B'} style={styles.alertTypeIcon} />
                     <Text style={[styles.alertTypeLabel, isSelected && styles.alertTypeLabelSelected]}>
                       {label}
                     </Text>
@@ -1367,10 +1421,10 @@ const MapScreen = () => {
             </View>
 
             {/* Mesaj — compact */}
-            <Text style={styles.alertFormLabel}>Mesaj alerta</Text>
+            <Text style={styles.alertFormLabel}>Mesaj alertă</Text>
             <TextInput
               style={styles.alertInput}
-              placeholder="Descrie situatia de urgenta..."
+              placeholder="Descrie situația de urgență…"
               placeholderTextColor="#999"
               value={alertMessage}
               onChangeText={setAlertMessage}
@@ -1381,7 +1435,7 @@ const MapScreen = () => {
             {/* Rază și Durată — pe același rând */}
             <View style={styles.alertRowInputs}>
               <View style={styles.alertHalfInput}>
-                <Text style={styles.alertFormLabel}>Raza (km)</Text>
+                <Text style={styles.alertFormLabel}>Rază (km)</Text>
                 <TextInput
                   style={styles.alertInputSmall}
                   placeholder="1"
@@ -1392,7 +1446,7 @@ const MapScreen = () => {
                 />
               </View>
               <View style={styles.alertHalfInput}>
-                <Text style={styles.alertFormLabel}>Durata (ore)</Text>
+                <Text style={styles.alertFormLabel}>Durată (ore)</Text>
                 <TextInput
                   style={styles.alertInputSmall}
                   placeholder="24"
@@ -1410,7 +1464,7 @@ const MapScreen = () => {
                 style={styles.alertCancelBtn}
                 onPress={() => { Keyboard.dismiss(); handleCancelAlert(); }}
               >
-                <Text style={styles.alertCancelBtnText}>Anuleaza</Text>
+                <Text style={styles.alertCancelBtnText}>Anulează</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.alertSubmitBtn, isCreatingAlert && styles.alertSubmitBtnDisabled]}
@@ -1420,7 +1474,7 @@ const MapScreen = () => {
                 {isCreatingAlert ? (
                   <ActivityIndicator color="white" size="small" />
                 ) : (
-                  <Text style={styles.alertSubmitBtnText}>Trimite Alerta</Text>
+                  <Text style={styles.alertSubmitBtnText}>Trimite alerta</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -1434,13 +1488,14 @@ const MapScreen = () => {
       {selectedAlert && !showAlertForm && (
         <View style={styles.alertDetailCard}>
           <View style={styles.alertDetailHeader}>
-            <View style={[styles.alertDetailBadge, { backgroundColor: ALERT_SEVERITY_LABELS[selectedAlert.severity].color }]}>
+            <View style={[styles.alertDetailBadge, styles.alertDetailBadgeRow, { backgroundColor: ALERT_SEVERITY_LABELS[selectedAlert.severity].color }]}>
+              <MaterialCommunityIcons name={ALERT_TYPE_MDI[selectedAlert.type]} size={15} color="#FFFFFF" style={styles.alertDetailBadgeIcon} />
               <Text style={styles.alertDetailBadgeText}>
-                {ALERT_TYPE_LABELS[selectedAlert.type].icon} {ALERT_TYPE_LABELS[selectedAlert.type].label}
+                {ALERT_TYPE_LABELS[selectedAlert.type].label}
               </Text>
             </View>
-            <TouchableOpacity onPress={() => setSelectedAlert(null)} style={styles.alertDetailClose}>
-              <Text style={styles.alertDetailCloseText}>✕</Text>
+            <TouchableOpacity onPress={() => setSelectedAlert(null)} style={styles.alertDetailClose} accessibilityRole="button" accessibilityLabel="Închide">
+              <MaterialCommunityIcons name="close" size={16} color="#64748B" />
             </TouchableOpacity>
           </View>
 
@@ -1472,8 +1527,9 @@ const MapScreen = () => {
 
           {userLocation && (
             <View style={styles.alertDetailDistance}>
+              <MaterialCommunityIcons name="map-marker-distance" size={15} color="#64748B" style={styles.alertDetailDistanceIcon} />
               <Text style={styles.alertDetailDistanceText}>
-                📍 La {formatDistance(calculateDistance(
+                La {formatDistance(calculateDistance(
                   userLocation.latitude,
                   userLocation.longitude,
                   selectedAlert.lat,
@@ -1539,7 +1595,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
   retryButton: {
-    backgroundColor: '#007AFF',
+    backgroundColor: '#2563EB',
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 8,
@@ -1794,6 +1850,13 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#E2E8F0',
   },
+  alertsModalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  alertsModalTitleIcon: {
+    marginRight: 8,
+  },
   alertsModalTitle: {
     fontSize: 18,
     fontWeight: 'bold',
@@ -1851,6 +1914,13 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 12,
   },
+  alertCardBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  alertCardBadgeIcon: {
+    marginRight: 4,
+  },
   alertCardBadgeText: {
     color: 'white',
     fontSize: 12,
@@ -1875,7 +1945,14 @@ const styles = StyleSheet.create({
   alertCardDetail: {
     fontSize: 12,
     color: '#64748B',
-    marginBottom: 4,
+  },
+  alertCardDetailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 5,
+  },
+  alertCardDetailIcon: {
+    marginRight: 6,
   },
   alertCardActions: {
     flexDirection: 'row',
@@ -1902,6 +1979,13 @@ const styles = StyleSheet.create({
   },
   alertCardDeleteBtnDisabled: {
     opacity: 0.5,
+  },
+  alertCardDeleteBtnRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  alertCardDeleteBtnIcon: {
+    marginRight: 4,
   },
   alertCardDeleteBtnText: {
     color: '#DC2626',
@@ -1940,7 +2024,7 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   filterBtnActive: {
-    backgroundColor: '#007AFF',
+    backgroundColor: '#2563EB',
   },
 
   // Filter menu
@@ -1974,7 +2058,7 @@ const styles = StyleSheet.create({
   },
   filterSelectAll: {
     fontSize: 12,
-    color: '#007AFF',
+    color: '#2563EB',
   },
   filterItem: {
     flexDirection: 'row',
@@ -2021,8 +2105,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   filterCheckboxActive: {
-    backgroundColor: '#007AFF',
-    borderColor: '#007AFF',
+    backgroundColor: '#2563EB',
+    borderColor: '#2563EB',
   },
   filterCheckmark: {
     color: 'white',
@@ -2114,10 +2198,15 @@ const styles = StyleSheet.create({
   },
   navButton: {
     marginTop: 10,
-    backgroundColor: '#007AFF',
+    backgroundColor: '#2563EB',
     padding: 14,
     borderRadius: 10,
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navButtonIcon: {
+    marginRight: 8,
   },
   navButtonText: {
     color: 'white',
@@ -2181,6 +2270,13 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 20,
   },
+  alertDetailBadgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  alertDetailBadgeIcon: {
+    marginRight: 5,
+  },
   alertDetailBadgeText: {
     color: 'white',
     fontWeight: '600',
@@ -2229,7 +2325,12 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     borderTopWidth: 1,
     borderTopColor: '#E2E8F0',
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+  },
+  alertDetailDistanceIcon: {
+    marginRight: 6,
   },
   alertDetailDistanceText: {
     fontSize: 14,

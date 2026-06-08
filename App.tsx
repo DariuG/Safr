@@ -121,6 +121,9 @@ function TabNavigator() {
         component={ChatScreen}
         options={{
           tabBarLabel: 'Chat',
+          // Ascunde bara de taburi când tastatura e deschisă, ca să elibereze
+          // spațiu pentru conversație și să nu acopere câmpul de input.
+          tabBarHideOnKeyboard: true,
           tabBarIcon: ({ color, size }) => (
             <MaterialCommunityIcons name="chat" color={color} size={28} />
           ),

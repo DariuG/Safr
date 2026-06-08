@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,9 +8,14 @@ import {
   ScrollView,
   TextInput,
   ActivityIndicator,
-  Platform
+  Platform,
+  Animated,
+  Easing,
+  Keyboard,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { initLlama, releaseAllLlama } from 'llama.rn';
 import ProgressBar from '../components/ProgressBar';
 import {
@@ -38,6 +43,57 @@ type Message = {
 // devin haotice (problema cu "prim ajutor" diluând signal-ul AVC).
 const QUERY_PREFIX = 'search_query: ';
 
+/**
+ * Trei puncte care pulsează secvențial — indicator de tip "typing" afișat
+ * în bula asistentului cât timp se procesează un răspuns. Pur vizual.
+ */
+const TypingDots = () => {
+  const dots = useRef([new Animated.Value(0), new Animated.Value(0), new Animated.Value(0)]).current;
+
+  useEffect(() => {
+    const animations = dots.map((dot, i) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(i * 160),
+          Animated.timing(dot, {
+            toValue: 1,
+            duration: 320,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.timing(dot, {
+            toValue: 0,
+            duration: 320,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+        ]),
+      ),
+    );
+    animations.forEach(a => a.start());
+    return () => animations.forEach(a => a.stop());
+  }, [dots]);
+
+  return (
+    <View style={styles.typingDotsRow}>
+      {dots.map((dot, i) => (
+        <Animated.View
+          key={i}
+          style={[
+            styles.typingDot,
+            {
+              opacity: dot.interpolate({ inputRange: [0, 1], outputRange: [0.3, 1] }),
+              transform: [
+                { translateY: dot.interpolate({ inputRange: [0, 1], outputRange: [0, -3] }) },
+              ],
+            },
+          ]}
+        />
+      ))}
+    </View>
+  );
+};
+
 // Prag de hard-reject pentru retrieval RAG. Sub această valoare, query-ul e
 // considerat în afara domeniului → răspuns standard "sună la 112" fără a chema
 // LLM-ul. ATENȚIE: necesită recalibrare pe device fizic (vezi ToDo 2bis.1) —
@@ -51,6 +107,12 @@ const RAG_THRESHOLD = 0.6;
 // care se potrivesc întâmplător cu patternuri scurte din KB.
 const MIN_QUERY_CHARS = 15;
 const MIN_QUERY_WORDS = 3;
+
+// Persistența istoricului de chat. Salvăm doar ultimele N mesaje (fără mesajul
+// de sistem, care se reconstruiește), pentru a supraviețui navigării între
+// ecrane și reporniri ale aplicației.
+const CHAT_HISTORY_KEY = '@safr_chat_history';
+const MAX_PERSISTED_MESSAGES = 20;
 
 const ChatScreen = () => {
 
@@ -80,6 +142,14 @@ const ChatScreen = () => {
 	const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeEntry[]>([]);
 	const [isGenerating, setIsGenerating] = useState<boolean>(false);
 	const [isInitializing, setIsInitializing] = useState<boolean>(false);
+	// Faza curentă a unui răspuns în curs, pentru indicatorul cu mesaj:
+	//  - 'searching'  → embedding + retrieval RAG ("caută informații")
+	//  - 'generating' → inferență LLM ("scrie răspunsul")
+	const [genPhase, setGenPhase] = useState<'idle' | 'searching' | 'generating'>('idle');
+	// Textul răspunsului în curs de streaming (token-cu-token). Ținut separat de
+	// `conversation` ca să nu re-randăm întreaga listă la fiecare token — doar
+	// bula de streaming se actualizează; la final, textul e mutat în conversation.
+	const [streamingText, setStreamingText] = useState<string>('');
 	// DEV: rezultat al testului de similaritate pure (fără LLM). De ascuns/scos înainte de release.
 	const [debugResult, setDebugResult] = useState<{
 		query: string;
@@ -92,6 +162,13 @@ const ChatScreen = () => {
 	// Resetat la true doar prin tap pe "Reîncearcă".
 	const loadAttemptedRef = React.useRef(false);
 	const scrollViewRef = React.useRef<ScrollView>(null);
+	// Devine true după ce istoricul persistat a fost încărcat — previne
+	// salvarea (și suprascrierea) înainte ca load-ul să termine.
+	const historyLoadedRef = React.useRef(false);
+	// Tastatura deschisă? Folosit pentru a reduce padding-ul de jos (rezervat
+	// barei de taburi) când tastatura e vizibilă, ca input-ul să stea lipit
+	// de aceasta. Bara de taburi e ascunsă automat prin tabBarHideOnKeyboard.
+	const [keyboardVisible, setKeyboardVisible] = useState<boolean>(false);
 
 	// File constants — sursă de adevăr e modelManager
 	const MODEL_FORMAT = LLM_FILE;
@@ -101,6 +178,49 @@ const ChatScreen = () => {
   useEffect(() => {
     const unsubscribe = modelManager.subscribe(setModelState);
     return unsubscribe;
+  }, []);
+
+  // Încarcă istoricul persistat la montare (o singură dată).
+  useEffect(() => {
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(CHAT_HISTORY_KEY);
+        if (raw) {
+          const saved: Message[] = JSON.parse(raw);
+          if (Array.isArray(saved) && saved.length > 0) {
+            // Reconstruim conversația: mesajul de sistem + istoricul salvat.
+            setConversation([INITIAL_CONVERSATION[0], ...saved]);
+          }
+        }
+      } catch (e) {
+        console.warn('[ChatScreen] Failed to load chat history:', e);
+      } finally {
+        historyLoadedRef.current = true;
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Salvează istoricul (ultimele N mesaje, fără system) la fiecare schimbare.
+  // Guard-ul historyLoadedRef previne suprascrierea înainte de load.
+  useEffect(() => {
+    if (!historyLoadedRef.current) return;
+    const messages = conversation.slice(1).slice(-MAX_PERSISTED_MESSAGES);
+    AsyncStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(messages)).catch(e =>
+      console.warn('[ChatScreen] Failed to save chat history:', e),
+    );
+  }, [conversation]);
+
+  // Tracking tastatură pentru ajustarea padding-ului input-ului
+  useEffect(() => {
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvt, () => setKeyboardVisible(true));
+    const hideSub = Keyboard.addListener(hideEvt, () => setKeyboardVisible(false));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
   }, []);
 
   // DEV: rulează DOAR embedding + retrieval, fără LLM. Returnează scorurile top 5
@@ -187,6 +307,8 @@ const ChatScreen = () => {
 
     const userMessage = userInput.trim();
     setIsGenerating(true);
+    setGenPhase('searching');
+    setStreamingText('');
     setUserInput('');
 
     // Guard pe lungime minimă — query-uri foarte scurte ("salut", "ce faci")
@@ -206,6 +328,7 @@ const ChatScreen = () => {
         },
       ]);
       setIsGenerating(false);
+      setGenPhase('idle');
       return;
     }
 
@@ -258,6 +381,7 @@ const ChatScreen = () => {
                 },
               ]);
               setIsGenerating(false);
+              setGenPhase('idle');
               return;
             }
 
@@ -293,9 +417,13 @@ const ChatScreen = () => {
           'Reply in Romanian that you do not have information about this topic and suggest calling 112.';
       }
 
-      // Keep only the last 4 message pairs (8 messages) to avoid context overflow
-      // Skip the original system message (index 0) when slicing
-      const recentMessages = conversation.slice(1).slice(-8);
+      // Păstrăm doar ultimele 4 mesaje (2 schimburi) pentru a evita depășirea
+      // ferestrei de context. Entry-urile RAG sunt lungi (~700 tokeni fiecare),
+      // iar răspunsurile asistentului pot ajunge la 512 tokeni — un istoric prea
+      // lung + 2 entries RAG + system prompt depășeau n_ctx și produceau eroarea
+      // "context is full". Pentru first-aid, întrebările sunt în mare independente,
+      // deci un istoric scurt e suficient. Sărim mesajul de sistem (index 0).
+      const recentMessages = conversation.slice(1).slice(-4);
 
       const newConversation: Message[] = [
         { role: 'system', content: systemMessage },
@@ -321,24 +449,42 @@ const ChatScreen = () => {
         '<|end▁of▁sentence|>',
         '<｜end▁of▁sentence｜>',
       ];
-      
-      // Send to model with retrieved context.
-      // n_predict: 512 = ~10-12 propoziții, suficient pentru first-aid;
-      // pe Llama 3.2 1B emulator (~2-5 tok/s) răspunde în 1-3 min în loc
-      // de 30+ min cu valoarea anterioară 10000. Stop tokens acoperă
-      // formatele Llama 3 (`<|eot_id|>`) și fallback-uri pentru alte
-      // modele care ar putea fi încărcate.
-      const result = await context.completion({
-        messages: newConversation,
-        n_predict: 512,
-        stop: stopWords,
-      });
 
-      // Ensure the result has text before updating the conversation
-      if (result && result.text) {
+      // Indicatorul rămâne pe "caută informații" (faza searching) pe TOATĂ
+      // durata de așteptare — embedding, retrieval ȘI procesarea prompt-ului de
+      // către LLM (faza lungă, înainte de primul token). Comutăm la faza
+      // "generating" abia când sosește PRIMUL token, moment în care textul
+      // începe să curgă. Astfel mesajul de status e mereu vizibil, iar
+      // tranziția la text e naturală.
+      // Send to model with retrieved context, cu STREAMING token-cu-token.
+      // Al doilea argument e un callback apelat la fiecare token nou; acumulăm
+      // în `streamingText` (afișat live), fără a re-randa întreaga conversație.
+      // n_predict: 512 = ~10-12 propoziții, suficient pentru first-aid.
+      let accumulated = '';
+      const result = await context.completion(
+        {
+          messages: newConversation,
+          n_predict: 512,
+          stop: stopWords,
+        },
+        (data: { token: string }) => {
+          if (data?.token) {
+            if (accumulated === '') {
+              setGenPhase('generating'); // primul token → trecem la text live
+            }
+            accumulated += data.token;
+            setStreamingText(accumulated);
+          }
+        },
+      );
+
+      // Textul final: preferăm acumulatul din streaming; fallback la result.text.
+      const finalText = (accumulated || result?.text || '').trim();
+
+      if (finalText) {
         setConversation(prev => [
           ...prev,
-          {role: 'assistant', content: result.text.trim()},
+          {role: 'assistant', content: finalText},
         ]);
       } else {
         throw new Error('No response from the model.');
@@ -351,6 +497,8 @@ const ChatScreen = () => {
       );
     } finally {
       setIsGenerating(false);
+      setGenPhase('idle');
+      setStreamingText('');
     }
   };
 
@@ -372,14 +520,14 @@ const ChatScreen = () => {
       // poate folosi doar 1 thread, ceea ce dă viteză de inferență sub
       // 5 tok/s. Cu 4 threads, ajungem la 15-25 tok/s pe procesoare moderne.
       // Mai mult de 4 nu ajută (Hermes + bridge devin bottleneck).
-      // n_ctx: 2048 (redus de la 4096) — KB-ul nostru injectează cel mult 2
-      // entry-uri × ~750 tokeni + system + mesaj user = ~1700 tokeni. 2048
-      // lasă spațiu pentru răspuns dar reduce semnificativ memoria KV cache
-      // și timpul de procesare prompt.
+      // n_ctx: 4096 — KB-ul injectează 2 entry-uri lungi (~700 tokeni fiecare =
+      // ~1400) + system (~250) + istoric (4 mesaje) + 512 rezervați răspunsului.
+      // 2048 se dovedea prea mic și producea "context is full"; 4096 oferă marjă.
+      // Cost: KV cache mai mare (mai mult RAM) — de validat pe device fizic.
       const llamaContext = await initLlama({
         model: destPath,
         use_mlock: true,
-        n_ctx: 2048,
+        n_ctx: 4096,
         n_threads: 4,
         n_gpu_layers: 1,
       });
@@ -555,9 +703,14 @@ const ChatScreen = () => {
 
   	return (
     <SafeAreaView style={styles.container}>
-      <ScrollView 
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={0}>
+      <ScrollView
         ref={scrollViewRef}
         contentContainerStyle={styles.scrollView}
+        keyboardShouldPersistTaps="handled"
         onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}>
         <Text style={styles.title}>Asistent Safr</Text>
         {/* Stare LLM: descărcare în curs sau eroare → progress / retry card */}
@@ -683,53 +836,72 @@ const ChatScreen = () => {
                 </View>
               </View>
             ))}
-            {isGenerating && (
-              <View style={[styles.messageBubble, styles.llamaBubble]}>
-                <ActivityIndicator size="small" color="#2563EB" />
+
+            {/* Așteptare (embedding + retrieval + procesare prompt LLM) —
+                vizibil până la primul token */}
+            {genPhase === 'searching' && (
+              <View style={styles.messageWrapper}>
+                <View style={[styles.messageBubble, styles.llamaBubble, styles.statusRow]}>
+                  <TypingDots />
+                  <Text style={styles.statusText}>Asistentul tău caută informații…</Text>
+                </View>
+              </View>
+            )}
+
+            {/* Generare — text care curge token-cu-token */}
+            {genPhase === 'generating' && streamingText !== '' && (
+              <View style={styles.messageWrapper}>
+                <View style={[styles.messageBubble, styles.llamaBubble]}>
+                  <Text style={styles.messageText}>{streamingText}</Text>
+                </View>
               </View>
             )}
           </View>
         )}
       </ScrollView>
       {context && (
-        <View style={styles.inputContainer}>
+        <View style={[styles.inputContainer, keyboardVisible && styles.inputContainerKeyboard]}>
           <View style={styles.buttonRow}>
             <TextInput
               style={styles.input}
-              placeholder="Type your message..."
+              placeholder="Scrie o întrebare…"
               placeholderTextColor="#94A3B8"
               value={userInput}
               onChangeText={setUserInput}
               multiline={true}
               maxLength={1000}
               returnKeyType="send"
+              editable={!isGenerating}
               onSubmitEditing={handleSendMessage}
             />
             <TouchableOpacity
               style={[
                 styles.testButton,
-                (isTesting || isGenerating || !userInput.trim()) && { backgroundColor: '#94A3B8' }
+                (isTesting || isGenerating || !userInput.trim()) && styles.buttonDisabled,
               ]}
               onPress={handleTestScores}
               disabled={isTesting || isGenerating || !userInput.trim()}>
               <Text style={styles.testButtonText}>
-                {isTesting ? '...' : '🔍'}
+                {isTesting ? '…' : '🔍'}
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[
                 styles.sendButton,
-                isGenerating && { backgroundColor: '#94A3B8' }
+                (isGenerating || !userInput.trim()) && styles.buttonDisabled,
               ]}
               onPress={handleSendMessage}
               disabled={isGenerating || !userInput.trim()}>
-              <Text style={styles.buttonText}>
-                {isGenerating ? 'Trimit...' : 'Send'}
-              </Text>
+              {isGenerating ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <Text style={styles.buttonText}>Trimite</Text>
+              )}
             </TouchableOpacity>
           </View>
         </View>
       )}
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -738,6 +910,9 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#FFFFFF',
+  },
+  flex: {
+    flex: 1,
   },
   loadingContainer: {
     flex: 1,
@@ -901,6 +1076,39 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#E2E8F0',
     paddingBottom: Platform.OS === 'ios' ? 110 : 100, // Space for tab bar (90px) + extra padding
+  },
+  // Când tastatura e deschisă, bara de taburi e ascunsă (tabBarHideOnKeyboard),
+  // deci padding-ul rezervat ei nu mai e necesar — input-ul stă lipit de tastatură.
+  inputContainerKeyboard: {
+    paddingBottom: 12,
+  },
+  buttonDisabled: {
+    backgroundColor: '#94A3B8',
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+
+  // ── Indicator de generare (typing / status pe faze) ──
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  statusText: {
+    marginLeft: 10,
+    fontSize: 14,
+    color: '#64748B',
+    fontStyle: 'italic',
+  },
+  typingDotsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  typingDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#2563EB',
+    marginHorizontal: 2,
   },
 
   // ── DEV: stiluri pentru testul de scor ──

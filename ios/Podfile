@@ -8,11 +8,18 @@ require Pod::Executable.execute_command('node', ['-p',
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 
-linkage = ENV['USE_FRAMEWORKS']
-if linkage != nil
-  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
-  use_frameworks! :linkage => linkage.to_sym
-end
+# react-native-firebase: the Firebase iOS SDK (12.x) ships Swift pods (e.g.
+# FirebaseAuth). Its umbrella header (`<Firebase/Firebase.h>`) unconditionally does
+# `#import <FirebaseAuth/FirebaseAuth-Swift.h>`, which only resolves when Firebase
+# is linked as frameworks. Static frameworks are the officially documented setup;
+# they also resolve the static_framework=true requirement pulled in by
+# react-native-bottom-tabs (Swift). See https://rnfirebase.io (iOS install notes).
+$RNFirebaseAsStaticFramework = true
+
+# Default to statically-linked frameworks (overridable via USE_FRAMEWORKS env).
+linkage = ENV['USE_FRAMEWORKS'] || 'static'
+Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
+use_frameworks! :linkage => linkage.to_sym
 
 target 'Safr' do
   config = use_native_modules!
@@ -22,17 +29,6 @@ target 'Safr' do
     # An absolute path to your application root.
     :app_path => "#{Pod::Config.instance.installation_root}/.."
   )
-
-  # Firebase requires modular headers for Swift interop
-  pod 'FirebaseCore', :modular_headers => true
-  pod 'FirebaseCoreInternal', :modular_headers => true
-  pod 'FirebaseFirestore', :modular_headers => true
-  pod 'FirebaseFirestoreInternal', :modular_headers => true
-  pod 'FirebaseCoreExtension', :modular_headers => true
-  pod 'FirebaseSharedSwift', :modular_headers => true
-  pod 'FirebaseAppCheckInterop', :modular_headers => true
-  pod 'GoogleUtilities', :modular_headers => true
-  pod 'nanopb', :modular_headers => true
 
   post_install do |installer|
     react_native_post_install(
@@ -44,6 +40,21 @@ target 'Safr' do
 
     # Required for MapLibre
     $MLRN.post_install(installer)
+
+    # Fix llama.rn under use_frameworks!: its podspec globs `ios/**/*.h`, which
+    # accidentally pulls the internal headers of the vendored `rnllama.xcframework`
+    # from BOTH slices (device + simulator) — same basenames. As a static lib this
+    # is harmless, but as a framework each maps to llama_rn.framework/Headers/X.h →
+    # "Multiple commands produce". Drop the xcframework's headers from llama-rn's
+    # public Headers phase (they belong to the vendored framework, not llama_rn).
+    installer.pods_project.targets.each do |target|
+      next unless target.name == 'llama-rn'
+      phase = target.headers_build_phase
+      phase.files.dup.each do |bf|
+        path = bf.file_ref.respond_to?(:real_path) ? bf.file_ref.real_path.to_s : bf.file_ref.path.to_s
+        phase.remove_build_file(bf) if path.include?('.xcframework')
+      end
+    end
 
     # Fix: Remove -weak_framework FirebaseFirestoreInternal from linker flags
     # It's already linked as a static library (-l), the weak_framework flag causes "framework not found"

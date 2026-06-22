@@ -37,6 +37,7 @@ local.properties
 
 # Firebase config (contains API keys)
 android/app/google-services.json
+ios/Safr/GoogleService-Info.plist
 ios/GoogleService-Info.plist
 
 # node.js

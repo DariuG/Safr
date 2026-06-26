@@ -130,6 +130,9 @@ const MapScreen = () => {
   );
 
   const cameraRef = useRef<MapLibreGL.CameraRef>(null);
+  // Timer pentru deschiderea întârziată a formularului de alertă (după ce
+  // markerul a fost afișat la long-press).
+  const alertFormTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Set de alert ID-uri deja cunoscute — popup doar pentru cele NOI
   const knownAlertIds = useRef<Set<string>>(new Set());
@@ -205,6 +208,15 @@ const MapScreen = () => {
     });
     return unsubscribe;
   }, [focusOnAlert]);
+
+  // Curăță timer-ul de deschidere a formularului la demontare.
+  useEffect(() => {
+    return () => {
+      if (alertFormTimerRef.current) {
+        clearTimeout(alertFormTimerRef.current);
+      }
+    };
+  }, []);
 
   // --- 1. SETUP HARTA OFFLINE ---
   // Copy-ul .mbtiles se face acum în mapResourcesService (apelat din App.tsx
@@ -603,21 +615,32 @@ const MapScreen = () => {
 
     const coordinates = event.geometry?.coordinates;
     if (coordinates && coordinates.length >= 2) {
-      const [lng, lat] = coordinates;
+      // GeoJSON e [lng, lat]; stocăm explicit ca {lat, lng} pentru alertă.
+      const lng = coordinates[0];
+      const lat = coordinates[1];
       console.log('[MapScreen] Admin long pressed at:', lat, lng);
 
+      // 1. Arată markerul IMEDIAT la punctul apăsat (coordonatele sunt înregistrate).
       setAlertTapLocation({ lat, lng });
-      setShowAlertForm(true);
       setSelectedLocation(null); // Închide orice bottom sheet deschis
       setShowFilterMenu(false);
+      setSelectedAlert(null);
 
-      // Centrează camera pe locația selectată
+      // Centrează camera pe locația apăsată (doar pan, fără schimbare de zoom).
       cameraRef.current?.setCamera({
         centerCoordinate: [lng, lat],
-        zoomLevel: 14,
-        animationDuration: 500,
+        animationDuration: 400,
         animationMode: 'flyTo',
       });
+
+      // 2. Deschide formularul cu o mică întârziere (1s), ca utilizatorul să vadă
+      //    întâi markerul și locul ales, înainte ca sheet-ul să urce peste el.
+      if (alertFormTimerRef.current) {
+        clearTimeout(alertFormTimerRef.current);
+      }
+      alertFormTimerRef.current = setTimeout(() => {
+        setShowAlertForm(true);
+      }, 1000);
     }
   }, [isAdmin]);
 
@@ -656,7 +679,19 @@ const MapScreen = () => {
         createdBy: 'admin',
       };
 
-      await createAlert(alertData);
+      const newAlertId = await createAlert(alertData);
+
+      // Pre-înregistrăm ID-ul ca seen ÎNAINTE ca snapshot-ul Firestore
+      // să sosească. Altfel, dispozitivul creator și-ar trata propria alertă ca
+      // fiind „nouă" și ar afișa un al doilea popup („Alertă nouă") peste „Succes".
+      knownAlertIds.current.add(newAlertId);
+
+      // Centrează camera pe locația alertei create.
+      cameraRef.current?.setCamera({
+        centerCoordinate: [alertTapLocation.lng, alertTapLocation.lat],
+        animationDuration: 400,
+        animationMode: 'flyTo',
+      });
 
       Alert.alert('Succes', 'Alerta a fost creată și trimisă!');
 
@@ -678,6 +713,11 @@ const MapScreen = () => {
 
   // --- CANCEL ALERT FORM ---
   const handleCancelAlert = useCallback(() => {
+    // Anulează deschiderea întârziată a formularului, dacă e încă în așteptare.
+    if (alertFormTimerRef.current) {
+      clearTimeout(alertFormTimerRef.current);
+      alertFormTimerRef.current = null;
+    }
     setShowAlertForm(false);
     setAlertTapLocation(null);
     setAlertMessage('');
@@ -842,6 +882,12 @@ const MapScreen = () => {
           setSelectedAlert(null);
           setShowFilterMenu(false);
           if (!showAlertForm) {
+            // Atingere pe hartă în fereastra de 1s dinaintea formularului:
+            // anulează deschiderea programată și markerul provizoriu.
+            if (alertFormTimerRef.current) {
+              clearTimeout(alertFormTimerRef.current);
+              alertFormTimerRef.current = null;
+            }
             setAlertTapLocation(null);
           }
         }}
@@ -933,7 +979,9 @@ const MapScreen = () => {
             coordinate={[alertTapLocation.lng, alertTapLocation.lat]}
           >
             <View style={styles.alertTapMarker}>
-              <MaterialCommunityIcons name="map-marker" size={40} color="#DC2626" />
+              <View style={styles.alertTapPin}>
+                <MaterialCommunityIcons name="plus" size={20} color="#FFFFFF" />
+              </View>
             </View>
           </MapLibreGL.PointAnnotation>
         )}
@@ -1350,6 +1398,7 @@ const MapScreen = () => {
           >
           <View style={styles.alertFormContainer}>
             <ScrollView
+              style={styles.alertFormScroll}
               contentContainerStyle={styles.alertFormScrollContent}
               showsVerticalScrollIndicator={true}
               keyboardShouldPersistTaps="handled"
@@ -1458,27 +1507,31 @@ const MapScreen = () => {
               </View>
             </View>
 
-            {/* Butoane */}
-            <View style={styles.alertFormButtons}>
-              <TouchableOpacity
-                style={styles.alertCancelBtn}
-                onPress={() => { Keyboard.dismiss(); handleCancelAlert(); }}
-              >
-                <Text style={styles.alertCancelBtnText}>Anulează</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.alertSubmitBtn, isCreatingAlert && styles.alertSubmitBtnDisabled]}
-                onPress={handleCreateAlert}
-                disabled={isCreatingAlert}
-              >
-                {isCreatingAlert ? (
-                  <ActivityIndicator color="white" size="small" />
-                ) : (
-                  <Text style={styles.alertSubmitBtnText}>Trimite alerta</Text>
-                )}
-              </TouchableOpacity>
+            </ScrollView>
+
+            {/* Footer fix cu butoane — mereu vizibil, lipit la baza sheet-ului,
+                deasupra zonei sigure (safe area). Nu mai depinde de scroll. */}
+            <View style={[styles.alertFormFooter, { paddingBottom: insets.bottom + 12 }]}>
+              <View style={styles.alertFormButtons}>
+                <TouchableOpacity
+                  style={styles.alertCancelBtn}
+                  onPress={() => { Keyboard.dismiss(); handleCancelAlert(); }}
+                >
+                  <Text style={styles.alertCancelBtnText}>Anulează</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.alertSubmitBtn, isCreatingAlert && styles.alertSubmitBtnDisabled]}
+                  onPress={handleCreateAlert}
+                  disabled={isCreatingAlert}
+                >
+                  {isCreatingAlert ? (
+                    <ActivityIndicator color="white" size="small" />
+                  ) : (
+                    <Text style={styles.alertSubmitBtnText}>Trimite alerta</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
             </View>
-          </ScrollView>
           </View>
           </KeyboardAvoidingView>
         </View>
@@ -2214,15 +2267,29 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
 
-  // Alert tap marker (when creating)
+  // Alert tap marker (when creating) — pin randat ca View (formă plină),
+  // nu ca glyph de font: apare instant și e proeminent, fără dependența de
+  // încărcarea fontului de iconițe (care întârzia rasterizarea în PointAnnotation).
   alertTapMarker: {
-    width: 40,
-    height: 40,
+    width: 44,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  alertTapMarkerText: {
-    fontSize: 30,
+  alertTapPin: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#DC2626',
+    borderWidth: 3,
+    borderColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 3,
   },
 
   // Alert marker on map
@@ -2386,9 +2453,22 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2,
     shadowRadius: 10,
   },
+  // ScrollView se contractă în interiorul containerului (maxHeight), lăsând
+  // footer-ul cu butoane mereu vizibil sub el.
+  alertFormScroll: {
+    flexShrink: 1,
+  },
   alertFormScrollContent: {
     padding: 16,
-    paddingBottom: Platform.OS === 'ios' ? 50 : 80,
+    paddingBottom: 8,
+  },
+  // Footer fix cu butoanele — separat de zona scrollabilă.
+  alertFormFooter: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+    backgroundColor: '#FFFFFF',
   },
   alertFormHeader: {
     flexDirection: 'row' as const,
@@ -2513,7 +2593,6 @@ const styles = StyleSheet.create({
   // Alert form buttons — compact
   alertFormButtons: {
     flexDirection: 'row' as const,
-    marginTop: 14,
     marginHorizontal: -4,
   },
   alertCancelBtn: {

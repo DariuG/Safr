@@ -102,6 +102,14 @@ const TypingDots = () => {
 // PASS/fail), handleSendMessage (reject) și debug card UI.
 const RAG_THRESHOLD = 0.6;
 
+// Prag pentru răspuns EXTRACTIV (RAG pe trepte de încredere — ToDo §4ter / RO.1).
+// La potriviri foarte bune (scor ≥ acest prag), întoarcem DIRECT răspunsul verificat
+// din KB, fără a mai chema LLM-ul. Avantaj decisiv pentru un context safety-critical:
+// română corectă garantată + zero halucinație + zero drift de limbă + răspuns instant.
+// Între RAG_THRESHOLD și acest prag, lăsăm LLM-ul să parafrazeze contextul (treapta
+// generativă). NECESITĂ calibrare pe device fizic, împreună cu RAG_THRESHOLD (ToDo 2bis.1 / RO.6).
+const EXTRACTIVE_THRESHOLD = 0.75;
+
 // Lungime minimă query (caractere + cuvinte) sub care cerem reformulare.
 // Query-uri foarte scurte ("salut", "ce faci") produc embedding-uri ambigue
 // care se potrivesc întâmplător cu patternuri scurte din KB.
@@ -116,22 +124,25 @@ const MAX_PERSISTED_MESSAGES = 20;
 
 const ChatScreen = () => {
 
-	// System prompt: instrucțiunile sunt în engleză (Llama 3.2 1B Instruct urmează
-	// instrucțiunile mai strict pe EN), dar modelul e instruit explicit să răspundă
-	// EXCLUSIV în limba română. KB-ul este în română, deci contextul injectat va
-	// fi tot RO și modelul poate copia/parafraza direct.
+	// System prompt scris ÎN LIMBA ROMÂNĂ. Pe un model mic care nu suportă oficial
+	// româna, specificarea explicită a limbii țintă în limba țintă ancorează puternic
+	// generarea și reduce comutarea spre engleză (vezi ToDo §4ter / research RO.4).
+	// Include un scurt exemplu (few-shot) de răspuns corect, ca model de ton și limbă.
 	const INITIAL_CONVERSATION: Message[] = [
 		{
 			role: 'system',
 			content:
-				'You are a Romanian-speaking first-aid emergency assistant.\n\n' +
-				'CRITICAL RULES:\n' +
-				'- Respond ONLY in Romanian language. Never use English in your answers.\n' +
-				'- Use ONLY information from the CONTEXT section below. Do not invent medical advice.\n' +
-				'- If the CONTEXT does not contain the answer, reply in Romanian: "Nu am informații despre această situație. Sună la 112 pentru ajutor profesionist."\n' +
-				'- Be concise and clear. Use numbered steps for procedures.\n' +
-				'- Always remind to call 112 in serious emergencies.\n' +
-				'- Answer in 2-6 sentences maximum unless the user asks for detailed steps.',
+				'Ești un asistent de prim ajutor care vorbește exclusiv în limba română.\n\n' +
+				'REGULI OBLIGATORII:\n' +
+				'- Răspunde ÎNTOTDEAUNA numai în limba română. Nu folosi niciodată cuvinte în engleză.\n' +
+				'- Folosește DOAR informațiile din secțiunea CONTEXT de mai jos. Nu inventa sfaturi medicale.\n' +
+				'- Dacă în CONTEXT nu există răspunsul, spune: "Nu am informații despre această situație. Sună la 112 pentru ajutor profesionist."\n' +
+				'- Fii concis și clar. Folosește pași numerotați pentru proceduri.\n' +
+				'- Amintește mereu să sune la 112 în urgențe grave.\n' +
+				'- Răspunde în maximum 2-6 propoziții, dacă utilizatorul nu cere pași detaliați.\n\n' +
+				'EXEMPLU de răspuns corect:\n' +
+				'Întrebare: "Cum opresc o sângerare la mână?"\n' +
+				'Răspuns: "Apasă ferm pe rană cu un material curat și menține presiunea continuă. Ridică mâna deasupra nivelului inimii. Dacă sângerarea nu se oprește, sună la 112."',
 		},
 	];
 
@@ -371,9 +382,12 @@ const ChatScreen = () => {
               }`,
             );
 
+            // Treapta 3 (hard-reject): scor sub prag → în afara domeniului.
+            // Răspuns standard "sună la 112", fără a chema LLM-ul.
             if (bestScore < RAG_THRESHOLD) {
               setConversation(prev => [
                 ...prev,
+                { role: 'user', content: userMessage },
                 {
                   role: 'assistant',
                   content:
@@ -385,6 +399,23 @@ const ChatScreen = () => {
               return;
             }
 
+            // Treapta 1 (extractiv): potrivire foarte bună → întoarce DIRECT
+            // răspunsul verificat din KB, fără apel LLM. Garantează română corectă
+            // + conținut sigur + răspuns instant (vezi EXTRACTIVE_THRESHOLD / RO.1).
+            if (bestScore >= EXTRACTIVE_THRESHOLD) {
+              const kbAnswer = relevantEntries[0].entry.response;
+              console.log('[RAG] extractive answer (no LLM)');
+              setConversation(prev => [
+                ...prev,
+                { role: 'user', content: userMessage },
+                { role: 'assistant', content: kbAnswer },
+              ]);
+              setIsGenerating(false);
+              setGenPhase('idle');
+              return;
+            }
+
+            // Treapta 2 (generativ): scor intermediar → LLM parafrazează contextul.
             if (relevantEntries.length > 0) {
               retrievedContext = formatContextForPrompt(relevantEntries);
               console.log(
@@ -405,16 +436,16 @@ const ChatScreen = () => {
       let systemMessage = INITIAL_CONVERSATION[0].content;
 
       if (retrievedContext) {
-        // Medical query with relevant context found
+        // Query medical cu context relevant găsit
         systemMessage +=
-          '\n\nCONTEXT (in Romanian):\n' +
+          '\n\nCONTEXT (în limba română):\n' +
           retrievedContext +
-          '\n\nUse ONLY the information above to answer the user. Respond in Romanian.';
+          '\n\nFolosește DOAR informațiile de mai sus pentru a răspunde. Răspunde în limba română.';
       } else {
-        // No relevant context found - refuse to answer (model is instructed to reply in RO)
+        // Fără context relevant — refuz controlat, în limba română
         systemMessage +=
-          '\n\nCONTEXT:\nNo relevant information available.\n\n' +
-          'Reply in Romanian that you do not have information about this topic and suggest calling 112.';
+          '\n\nCONTEXT:\nNu există informații relevante.\n\n' +
+          'Răspunde în limba română că nu ai informații despre acest subiect și recomandă apelarea numărului 112.';
       }
 
       // Păstrăm doar ultimele 4 mesaje (2 schimburi) pentru a evita depășirea
@@ -466,6 +497,13 @@ const ChatScreen = () => {
           messages: newConversation,
           n_predict: 512,
           stop: stopWords,
+          // Sampling ancorat (RO.5): temperatură joasă → output determinist,
+          // ancorat în context, cu mai puțin drift de limbă și mai puține
+          // halucinații. penalty_repeat ușor previne repetițiile.
+          temperature: 0.2,
+          top_p: 0.9,
+          top_k: 40,
+          penalty_repeat: 1.1,
         },
         (data: { token: string }) => {
           if (data?.token) {

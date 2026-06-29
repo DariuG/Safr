@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
@@ -103,7 +103,11 @@ const HomeScreen = () => {
 
           {/* Hero */}
           <View style={s.hero}>
-            <Text style={s.heroLabel}>SAFR</Text>
+            <Image
+              source={require('../../assets/logo/safr_logo_hero.png')}
+              style={s.heroLogo}
+              resizeMode="contain"
+            />
             <Text style={s.heroTitle}>Siguranța ta, prioritatea noastră</Text>
             <Text style={s.heroSub}>
               Alerte, adăposturi și asistență AI la un tap distanță.
@@ -279,10 +283,9 @@ const s = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 14,
   },
-  heroLabel: {
-    fontSize: 26,
-    fontWeight: 'bold',
-    color: '#60A5FA',
+  heroLogo: {
+    width: 124,
+    height: 124,
     marginBottom: 4,
   },
   heroTitle: {

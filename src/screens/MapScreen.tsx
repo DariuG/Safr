@@ -30,6 +30,7 @@ import {
   AlertFocus,
 } from '../services/notificationService';
 import mapResourcesService, { MapResourcesState } from '../services/mapResourcesService';
+import toastService from '../services/toastService';
 
 // Helper function to create a circle polygon from center point and radius in km
 const createCirclePolygon = (centerLng: number, centerLat: number, radiusKm: number, points: number = 64): number[][] => {
@@ -125,6 +126,7 @@ const MapScreen = () => {
 
   // Stare pentru Filtrare
   const [showFilterMenu, setShowFilterMenu] = useState(false);
+  const [showLegend, setShowLegend] = useState(false);
   const [activeFilters, setActiveFilters] = useState<Set<Shelter['type']>>(
     new Set(['hospital', 'pharmacy', 'fire', 'police', 'bunker'])
   );
@@ -538,9 +540,8 @@ const MapScreen = () => {
   // Function to manually refresh shelters
   const handleRefreshShelters = useCallback(async () => {
     if (!userLocation) {
-      Alert.alert(
-        'Locație indisponibilă',
-        'Pentru a afișa locațiile de urgență din zona ta, activează serviciile de localizare (GPS) și acordă permisiunea aplicației.',
+      toastService.info(
+        'Activează GPS-ul pentru a afișa locațiile de urgență din zona ta.',
       );
       return;
     }
@@ -552,12 +553,12 @@ const MapScreen = () => {
       setSheltersError(result.error || null);
 
       if (result.source === 'api') {
-        Alert.alert('Succes', `Datele au fost actualizate. ${result.shelters.length} locații găsite.`);
+        toastService.success(`Date actualizate — ${result.shelters.length} locații găsite.`);
       } else if (result.error) {
-        Alert.alert('Atenție', result.error);
+        toastService.info(result.error);
       }
     } catch (error) {
-      Alert.alert('Eroare', 'Nu s-au putut actualiza datele.');
+      toastService.error('Nu s-au putut actualiza datele.');
     } finally {
       setSheltersLoading(false);
     }
@@ -652,15 +653,15 @@ const MapScreen = () => {
     const durationNum = parseFloat(alertDuration);
 
     if (isNaN(radiusNum) || radiusNum <= 0) {
-      Alert.alert('Eroare', 'Introdu o rază validă (în km)');
+      toastService.error('Introdu o rază validă (în km).');
       return;
     }
     if (isNaN(durationNum) || durationNum <= 0) {
-      Alert.alert('Eroare', 'Introdu o durată validă (în ore)');
+      toastService.error('Introdu o durată validă (în ore).');
       return;
     }
     if (!alertMessage.trim()) {
-      Alert.alert('Eroare', 'Introdu un mesaj pentru alertă');
+      toastService.error('Introdu un mesaj pentru alertă.');
       return;
     }
 
@@ -693,7 +694,7 @@ const MapScreen = () => {
         animationMode: 'flyTo',
       });
 
-      Alert.alert('Succes', 'Alerta a fost creată și trimisă!');
+      toastService.success('Alerta a fost creată și trimisă.');
 
       // Reset form
       setShowAlertForm(false);
@@ -705,7 +706,7 @@ const MapScreen = () => {
       setAlertSeverity('medium');
     } catch (error) {
       console.error('[MapScreen] Error creating alert:', error);
-      Alert.alert('Eroare', 'Nu s-a putut crea alerta. Verifică conexiunea.');
+      toastService.error('Nu s-a putut crea alerta. Verifică conexiunea.');
     } finally {
       setIsCreatingAlert(false);
     }
@@ -741,10 +742,10 @@ const MapScreen = () => {
               if (selectedAlert?.id === alertId) {
                 setSelectedAlert(null);
               }
-              Alert.alert('Succes', 'Alerta a fost ștearsă.');
+              toastService.success('Alerta a fost ștearsă.');
             } catch (error) {
               console.error('[MapScreen] Error deleting alert:', error);
-              Alert.alert('Eroare', 'Nu s-a putut șterge alerta.');
+              toastService.error('Nu s-a putut șterge alerta.');
             } finally {
               setDeletingAlertId(null);
             }
@@ -779,7 +780,7 @@ const MapScreen = () => {
         animationMode: 'flyTo'
       });
     } else {
-        Alert.alert("GPS", "Căutare semnal GPS...");
+        toastService.info('Căutare semnal GPS…');
     }
   };
 
@@ -881,6 +882,7 @@ const MapScreen = () => {
           setSelectedLocation(null);
           setSelectedAlert(null);
           setShowFilterMenu(false);
+          setShowLegend(false);
           if (!showAlertForm) {
             // Atingere pe hartă în fereastra de 1s dinaintea formularului:
             // anulează deschiderea programată și markerul provizoriu.
@@ -903,18 +905,16 @@ const MapScreen = () => {
           }}
         />
 
-        {/* --- CUSTOM USER LOCATION MARKER --- */}
-        {userLocation && (
-             <MapLibreGL.PointAnnotation
-                id="userLocation"
-                coordinate={[userLocation.longitude, userLocation.latitude]}
-             >
-                <View style={styles.userDotContainer}>
-                    <View style={styles.userDot} />
-                    <View style={styles.userDotRing} />
-                </View>
-             </MapLibreGL.PointAnnotation>
-        )}
+        {/* --- USER LOCATION (puck nativ MapLibre, cu săgeată de orientare) --- */}
+        {/* renderMode="native" + busola dispozitivului: bulina albastră clasică
+            cu săgeata care arată direcția în care e orientat telefonul (iOS:
+            showsUserHeadingIndicator; Android: androidRenderMode="compass"). */}
+        <MapLibreGL.UserLocation
+          visible
+          renderMode="native"
+          androidRenderMode="compass"
+          showsUserHeadingIndicator
+        />
 
         {/* --- ALERT ZONES (Firebase + BLE mesh) --- */}
         {/* alertRenderKey forțează re-mount la alerte noi BLE */}
@@ -1130,11 +1130,19 @@ const MapScreen = () => {
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.controlBtn, styles.filterBtn, showFilterMenu && styles.filterBtnActive]}
-          onPress={() => setShowFilterMenu(!showFilterMenu)}
+          onPress={() => { setShowFilterMenu(v => !v); setShowLegend(false); }}
           accessibilityRole="button"
           accessibilityLabel="Filtrează locațiile"
         >
           <MaterialCommunityIcons name="tune-variant" size={22} color={showFilterMenu ? '#FFFFFF' : '#333'} />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.controlBtn, styles.filterBtn, showLegend && styles.filterBtnActive]}
+          onPress={() => { setShowLegend(v => !v); setShowFilterMenu(false); }}
+          accessibilityRole="button"
+          accessibilityLabel="Legenda hărții"
+        >
+          <MaterialCommunityIcons name="information-outline" size={22} color={showLegend ? '#FFFFFF' : '#333'} />
         </TouchableOpacity>
       </View>
 
@@ -1184,6 +1192,44 @@ const MapScreen = () => {
           <Text style={styles.filterFooter}>
             {filteredShelters.length} din {shelters.length} afișate
           </Text>
+        </View>
+      )}
+
+      {/* --- LEGENDĂ HARTĂ --- */}
+      {showLegend && (
+        <View style={[styles.filterMenu, { top: insets.top + 74 }]}>
+          <View style={styles.filterHeader}>
+            <Text style={styles.filterTitle}>Legendă</Text>
+          </View>
+
+          {([
+            { type: 'hospital' as const, label: 'Spitale', icon: 'hospital' },
+            { type: 'pharmacy' as const, label: 'Farmacii', icon: 'plus' },
+            { type: 'fire' as const, label: 'Pompieri', icon: 'fire-truck' },
+            { type: 'police' as const, label: 'Poliție', icon: 'police-badge' },
+            { type: 'bunker' as const, label: 'Adăposturi', icon: 'shield-home' },
+          ]).map(({ type, label, icon }) => {
+            const style = getMarkerStyle(type);
+            return (
+              <View key={type} style={styles.legendItem}>
+                <View style={[styles.filterIcon, { backgroundColor: style.color, borderColor: style.borderColor }]}>
+                  <MaterialCommunityIcons name={icon} size={13} color="#FFFFFF" />
+                </View>
+                <Text style={styles.legendLabel}>{label}</Text>
+              </View>
+            );
+          })}
+
+          <View style={styles.legendDivider} />
+
+          <View style={styles.legendItem}>
+            <View style={styles.legendUserDot} />
+            <Text style={styles.legendLabel}>Locația ta</Text>
+          </View>
+          <View style={styles.legendItem}>
+            <View style={styles.legendAlertRing} />
+            <Text style={styles.legendLabel}>Zonă de alertă</Text>
+          </View>
         </View>
       )}
 
@@ -2174,6 +2220,41 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     borderTopWidth: 1,
     borderTopColor: '#E5E5E5',
+  },
+
+  // Legendă hartă
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  legendLabel: {
+    flex: 1,
+    fontSize: 14,
+    color: '#333',
+  },
+  legendDivider: {
+    height: 1,
+    backgroundColor: '#E5E5E5',
+    marginVertical: 6,
+  },
+  legendUserDot: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#4285F4',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    marginRight: 10,
+  },
+  legendAlertRing: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 2.5,
+    borderColor: '#EF4444',
+    backgroundColor: 'rgba(239,68,68,0.18)',
+    marginRight: 10,
   },
 
   // Bottom card (account for tab bar: Android ~60px, iOS ~85px with home indicator)

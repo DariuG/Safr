@@ -46,6 +46,9 @@ import { prefetchShelters } from './src/services/shelterService';
 // Permisiune locație (cerută la startup pentru ca prefetch-ul să funcționeze)
 import { ensureLocationPermission } from './src/utils/permissions';
 
+// Toast in-app (non-blocant) - montat o singură dată, peste navigare
+import ToastHost from './src/components/ToastHost';
+
 const Tab = createNativeBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
@@ -198,6 +201,7 @@ function App() {
             />
           </Stack.Navigator>
         </NavigationContainer>
+        <ToastHost />
       </SafeAreaProvider>
     </AuthProvider>
   );

@@ -109,6 +109,7 @@ const MapScreen = () => {
 
   // Stare pentru Harta Offline
   const [mapPath, setMapPath] = useState<string | null>(null);
+  const [glyphsTemplate, setGlyphsTemplate] = useState<string | null>(null);
   const [isMapReady, setIsMapReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
 
@@ -227,6 +228,7 @@ const MapScreen = () => {
   useEffect(() => {
     const unsubscribe = mapResourcesService.subscribe((s: MapResourcesState) => {
       setMapPath(s.mbtilesPath);
+      setGlyphsTemplate(mapResourcesService.getGlyphsTemplate());
       if (s.status === 'ready') {
         setMapError(null);
         setIsMapReady(true);
@@ -567,18 +569,54 @@ const MapScreen = () => {
   // --- 3. STIL HARTA ---
   const mapStyle = useMemo(() => {
     if (!mapPath) return null;
-    return {
+    const layers: any[] = [
+      { id: 'background', type: 'background', paint: { 'background-color': '#F0F2F5' } },
+      { id: 'landuse', type: 'fill', source: 'offline_source', 'source-layer': 'landuse', paint: { 'fill-color': '#D6E6D5' } },
+      { id: 'water', type: 'fill', source: 'offline_source', 'source-layer': 'water', paint: { 'fill-color': '#A0C8F0' } },
+      { id: 'buildings', type: 'fill', source: 'offline_source', 'source-layer': 'building', paint: { 'fill-color': '#D9D9D9', 'fill-outline-color': '#CCCCCC' } },
+      { id: 'roads', type: 'line', source: 'offline_source', 'source-layer': 'transportation', paint: { 'line-color': '#FFFFFF', 'line-width': 2 } },
+    ];
+    const style: any = {
       version: 8,
       sources: { 'offline_source': { type: 'vector', url: `mbtiles://${mapPath}` } },
-      layers: [
-        { id: 'background', type: 'background', paint: { 'background-color': '#F0F2F5' } },
-        { id: 'landuse', type: 'fill', source: 'offline_source', 'source-layer': 'landuse', paint: { 'fill-color': '#D6E6D5' } },
-        { id: 'water', type: 'fill', source: 'offline_source', 'source-layer': 'water', paint: { 'fill-color': '#A0C8F0' } },
-        { id: 'buildings', type: 'fill', source: 'offline_source', 'source-layer': 'building', paint: { 'fill-color': '#D9D9D9', 'fill-outline-color': '#CCCCCC' } },
-        { id: 'roads', type: 'line', source: 'offline_source', 'source-layer': 'transportation', paint: { 'line-color': '#FFFFFF', 'line-width': 2 } },
-      ]
+      layers,
     };
-  }, [mapPath]);
+    // Etichete (nume localități + străzi) - doar dacă fonturile offline sunt disponibile.
+    if (glyphsTemplate) {
+      style.glyphs = glyphsTemplate;
+      layers.push(
+        {
+          id: 'place-labels',
+          type: 'symbol',
+          source: 'offline_source',
+          'source-layer': 'place',
+          minzoom: 6,
+          layout: {
+            'text-font': ['NotoSans'],
+            'text-field': ['coalesce', ['get', 'name'], ['get', 'name:latin']],
+            'text-size': ['interpolate', ['linear'], ['zoom'], 6, 11, 12, 15],
+            'text-max-width': 8,
+          },
+          paint: { 'text-color': '#1E293B', 'text-halo-color': '#FFFFFF', 'text-halo-width': 1.4 },
+        },
+        {
+          id: 'street-labels',
+          type: 'symbol',
+          source: 'offline_source',
+          'source-layer': 'transportation_name',
+          minzoom: 14,
+          layout: {
+            'symbol-placement': 'line',
+            'text-font': ['NotoSans'],
+            'text-field': ['coalesce', ['get', 'name'], ['get', 'name:latin']],
+            'text-size': 12,
+          },
+          paint: { 'text-color': '#3A3A3A', 'text-halo-color': '#FFFFFF', 'text-halo-width': 1.3 },
+        },
+      );
+    }
+    return style;
+  }, [mapPath, glyphsTemplate]);
 
   // --- 4. CONTROL ZOOM (REPARAT) ---
   // Nu mai cerem zoom-ul camerei, ci folosim variabila noastră de stare

@@ -19,11 +19,16 @@ export type MapResourceStatus = 'unknown' | 'copying' | 'ready' | 'error';
 export interface MapResourcesState {
   status: MapResourceStatus;
   mbtilesPath: string | null;
+  glyphsReady: boolean;
   error: string | null;
 }
 
 const MBTILES_FILE = 'romania.mbtiles';
 const MBTILES_DEST = `${RNFS.DocumentDirectoryPath}/${MBTILES_FILE}`;
+
+// Fonturi (glyphs PBF) pentru etichetele offline. Numele fără spații = `text-font`.
+const GLYPH_FONT = 'NotoSans';
+const GLYPHS_DIR = `${RNFS.DocumentDirectoryPath}/glyphs/${GLYPH_FONT}`;
 
 type Listener = (state: MapResourcesState) => void;
 
@@ -31,6 +36,7 @@ class MapResourcesService {
   private state: MapResourcesState = {
     status: 'unknown',
     mbtilesPath: null,
+    glyphsReady: false,
     error: null,
   };
 
@@ -45,6 +51,12 @@ class MapResourcesService {
 
   public getMbtilesPath(): string | null {
     return this.state.mbtilesPath;
+  }
+
+  /** Template pentru `glyphs` din stilul MapLibre (null dacă fonturile nu sunt disponibile). */
+  public getGlyphsTemplate(): string | null {
+    if (!this.state.glyphsReady) return null;
+    return `file://${RNFS.DocumentDirectoryPath}/glyphs/{fontstack}/{range}.pbf`;
   }
 
   /**
@@ -114,11 +126,38 @@ class MapResourcesService {
         throw new Error('Fișierul hărții nu a putut fi verificat după copiere');
       }
 
-      this.update({ status: 'ready', mbtilesPath: MBTILES_DEST, error: null });
+      const glyphsReady = await this.copyGlyphsIfNeeded();
+      this.update({ status: 'ready', mbtilesPath: MBTILES_DEST, glyphsReady, error: null });
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Eroare necunoscută la copierea hărții';
       console.error('[MapResources] Copy failed:', msg);
       this.update({ status: 'error', mbtilesPath: null, error: msg });
+    }
+  }
+
+  // Copiază toate fișierele .pbf glyph din bundle. Non-fatal: dacă lipsesc, întoarce false.
+  private async copyGlyphsIfNeeded(): Promise<boolean> {
+    try {
+      const isAndroid = Platform.OS === 'android';
+      const srcDir = isAndroid ? `glyphs/${GLYPH_FONT}` : `${RNFS.MainBundlePath}/glyphs/${GLYPH_FONT}`;
+      const items = isAndroid ? await RNFS.readDirAssets(srcDir) : await RNFS.readDir(srcDir);
+      const pbfs = items.filter(i => i.name.endsWith('.pbf')).map(i => i.name);
+      if (pbfs.length === 0) return false;
+
+      await RNFS.mkdir(GLYPHS_DIR);
+      for (const name of pbfs) {
+        const dest = `${GLYPHS_DIR}/${name}`;
+        if (await RNFS.exists(dest)) continue; // copiază doar range-urile noi
+        if (isAndroid) {
+          await RNFS.copyFileAssets(`${srcDir}/${name}`, dest);
+        } else {
+          await RNFS.copyFile(`${srcDir}/${name}`, dest);
+        }
+      }
+      return true;
+    } catch (e) {
+      console.warn('[MapResources] Glyphs indisponibile — etichete dezactivate:', e instanceof Error ? e.message : e);
+      return false;
     }
   }
 
